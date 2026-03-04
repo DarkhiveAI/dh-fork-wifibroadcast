@@ -102,9 +102,8 @@ void WBVideoStreamTx::process_enqueued_frame(const EnqueuedFrame& enq_frame) {
 
 void WBVideoStreamTx::send_packet(const uint8_t* packet, int packet_len) {
   const auto radiotap_header = m_radiotap_header_holder->thread_safe_get();
-  const bool encrypt = m_enable_encryption.load();
   m_txrx->tx_inject_packet(options.radio_port, packet, packet_len,
-                           radiotap_header, encrypt);
+                           radiotap_header, false);
 }
 
 bool WBVideoStreamTx::send_video_config() {

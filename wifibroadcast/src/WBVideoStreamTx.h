@@ -77,7 +77,6 @@ class WBVideoStreamTx {
   bool send_video_config();
   std::shared_ptr<CodecConfigData> m_codec_config = nullptr;
   std::mutex m_codec_config_mutex;
-  std::atomic<bool> m_enable_encryption = true;
 };
 
 #endif  // WIFIBROADCAST_WBVIDEOSTREAMTX_H

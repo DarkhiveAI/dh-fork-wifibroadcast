@@ -4,10 +4,6 @@
 #include <sodium.h>
 
 #include <array>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "KeyPair.h"
 
 // Namespace that can be used to add encryption+packet validation
@@ -31,24 +27,6 @@ namespace wb {
  * Generates a new keypair. Non-deterministic, 100% secure.
  */
 KeyPairTxRx generate_keypair_random();
-
-/**
- * See https://libsodium.gitbook.io/doc/password_hashing
- * Deterministic seed from password, but hides password itself (non-reversible)
- * Uses a pre-defined salt to be deterministic
- */
-std::array<uint8_t, crypto_box_SEEDBYTES> create_seed_from_password_openhd_salt(
-    const std::string& pw, bool use_salt_air);
-
-// We always use the same bind phrase by default
-static constexpr auto DEFAULT_BIND_PHRASE = "openhd";
-/**
- * Generates 2 new (deterministic) tx rx keys, using the seed created from the
- * pw.
- * @param bind_phrase the password / bind phrase
- */
-KeyPairTxRx generate_keypair_from_bind_phrase(
-    const std::string& bind_phrase = DEFAULT_BIND_PHRASE);
 
 /**
  * https://libsodium.gitbook.io/doc/key_derivation

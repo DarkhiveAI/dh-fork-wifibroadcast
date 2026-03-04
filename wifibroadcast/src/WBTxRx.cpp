@@ -84,7 +84,7 @@ WBTxRx::WBTxRx(
   if (m_options.secure_keypair.has_value()) {
     keypair = m_options.secure_keypair.value();
   } else {
-    keypair = wb::generate_keypair_from_bind_phrase();
+    keypair = wb::generate_keypair_random();
   }
   m_encryptor = std::make_unique<wb::Encryptor>(
       keypair.get_tx_key(!m_options.use_gnd_identifier));

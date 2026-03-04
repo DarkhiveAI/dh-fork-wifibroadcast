@@ -114,7 +114,7 @@ void benchmark_crypt(const Options &options,
   assert(options.benchmarkType == BENCHMARK_ENCRYPT ||
          options.benchmarkType == BENCHMARK_DECRYPT);
   const bool encrypt = options.benchmarkType == BENCHMARK_ENCRYPT;
-  const wb::KeyPairTxRx keyPairTxRx = wb::generate_keypair_from_bind_phrase();
+  const wb::KeyPairTxRx keyPairTxRx = wb::generate_keypair_random();
   wb::Encryptor encryptor{keyPairTxRx.key_1};
   encryptor.set_encryption_enabled(!packet_validation_only);
   wb::Decryptor decryptor{keyPairTxRx.key_1};

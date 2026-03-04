@@ -61,8 +61,7 @@
 class WBTxRx {
  public:
   struct Options {
-    // Bidirectional, so we need 2 keys. If not specified, keys generated from
-    // default bind phrase are used
+    // Bidirectional, so we need 2 keys. If not specified, random keys are used
     std::optional<wb::KeyPairTxRx> secure_keypair = std::nullopt;
     // on the rx pcap rx fd, set direction PCAP_D_IN (aka only packets received
     // by the card) - doesn't work on AR9271

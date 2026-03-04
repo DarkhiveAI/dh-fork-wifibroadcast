@@ -212,7 +212,7 @@ static void test_encrypt_decrypt_validate(const bool use_key_from_file,
                                           bool message_signing_only) {
   const std::string TEST_TYPE = message_signing_only ? "Sign" : "Encrypt&Sign";
   const std::string TEST_KEY_TYPE =
-      use_key_from_file ? "key from file" : "default key";
+      use_key_from_file ? "key from file" : "random key";
   fmt::print("Testing {} with {}\n", TEST_TYPE, TEST_KEY_TYPE);
   const std::string KEY_FILENAME = "../example_key/txrx.key";
   wb::KeyPairTxRx keyPairTxRx{};
@@ -221,11 +221,7 @@ static void test_encrypt_decrypt_validate(const bool use_key_from_file,
     assert(tmp.has_value());
     keyPairTxRx = tmp.value();
   } else {
-    const auto before = std::chrono::steady_clock::now();
-    keyPairTxRx = wb::generate_keypair_from_bind_phrase("openhd");
-    std::cout << "Generating keypair from bind phrase took:"
-              << MyTimeHelper::R(std::chrono::steady_clock::now() - before)
-              << std::endl;
+    keyPairTxRx = wb::generate_keypair_random();
   }
 
   wb::Encryptor encryptor{
@@ -295,7 +291,7 @@ static void test_encrypt_decrypt_validate(const bool use_key_from_file,
   fmt::print("Test {} with {} passed\n", TEST_TYPE, TEST_KEY_TYPE);
 }
 static void test_encryption_serialize() {
-  auto keypair1 = wb::generate_keypair_from_bind_phrase("openhd");
+  auto keypair1 = wb::generate_keypair_random();
   auto raw = wb::KeyPairTxRx::as_raw(keypair1);
   auto serialized_deserialized = wb::KeyPairTxRx::from_raw(raw);
   assert(keypair1 == serialized_deserialized);
