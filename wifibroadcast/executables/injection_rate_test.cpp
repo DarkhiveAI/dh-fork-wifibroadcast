@@ -2,9 +2,13 @@
 // Created by consti10 on 25.07.23.
 //
 
+#include <algorithm>
+#include <cstdlib>
+
 #include "../src/WBStreamRx.h"
 #include "../src/WBStreamTx.h"
 #include "../src/WBTxRx.h"
+#include "../src/HelperSources/WifiCardHelper.hpp"
 #include "../src/wifibroadcast_spdlog.h"
 #include "DummyStreamGenerator.hpp"
 #include "RandomBufferPot.hpp"
@@ -123,7 +127,7 @@ static void calculate_max_possible_pps_quick(
 
 static std::string validate_specific_rate(
     std::shared_ptr<WBTxRx> txrx, std::shared_ptr<RadiotapHeaderTxHolder> hdr,
-    const int mcs, const int rate_kbits) {
+    const int mcs, const int rate_kbits, int duration_seconds = 10) {
   auto m_console = wifibroadcast::log::create_or_get("main");
   const auto rate_bps =
       (rate_kbits * 1000) + 10;  // add a bit more to actually hit the target
@@ -142,7 +146,10 @@ static std::string validate_specific_rate(
       std::chrono::seconds(1));  // give driver time to empty queue
   txrx->tx_reset_stats();
   stream_generator->start();
-  std::this_thread::sleep_for(std::chrono::seconds(10));
+  if (duration_seconds < 1) {
+    duration_seconds = 1;
+  }
+  std::this_thread::sleep_for(std::chrono::seconds(duration_seconds));
   const auto txstats = txrx->get_tx_stats();
   std::stringstream ss;
   if (txstats.count_tx_injections_error_hint > 0 ||
@@ -287,17 +294,119 @@ void test_rates_and_print_results(std::shared_ptr<WBTxRx> txrx,
 int main(int argc, char* const* argv) {
   // std::string card="wlxac9e17596103";
   std::string card = "wlx200db0c3a53c";
+  std::string card_arg;
+  bool list_cards = false;
+  int freq_mhz = 0;
+  std::string ht_mode_arg;
+  int mcs_override = -1;
+  double rate_mbit = -1.0;
+  int duration_seconds = 10;
+  const bool interactive = (argc == 1);
   int opt;
-  while ((opt = getopt(argc, argv, "w:agd")) != -1) {
+  while ((opt = getopt(argc, argv, "w:lf:H:m:r:t:")) != -1) {
     switch (opt) {
       case 'w':
-        card = optarg;
+        card_arg = optarg;
+        break;
+      case 'l':
+        list_cards = true;
+        break;
+      case 'f':
+        freq_mhz = atoi(optarg);
+        break;
+      case 'H':
+        ht_mode_arg = optarg;
+        break;
+      case 'm':
+        mcs_override = atoi(optarg);
+        break;
+      case 'r':
+        rate_mbit = strtod(optarg, nullptr);
+        break;
+      case 't':
+        duration_seconds = atoi(optarg);
         break;
       default: /* '?' */
       show_usage:
-        fprintf(stderr, "injection rate test %s [-w wifi card to use]\n",
+        fprintf(stderr,
+                "injection rate test %s [-w iface|index] [-l] [-f freq_mhz]\n"
+                "  [-H HT20|HT40+|HT40-] [-m mcs] [-r rate_mbit] [-t seconds]\n",
                 argv[0]);
         exit(1);
+    }
+  }
+  const auto detected_cards =
+      wifibroadcast::wifi_card_helper::list_wifi_cards();
+  if (list_cards) {
+    std::cout << wifibroadcast::wifi_card_helper::format_card_list(
+        detected_cards);
+    return 0;
+  }
+  if (interactive) {
+    card = wifibroadcast::wifi_card_helper::prompt_select_card(detected_cards);
+    freq_mhz = wifibroadcast::wifi_card_helper::prompt_int(
+        "Set frequency MHz (empty to skip): ", 0, true);
+    ht_mode_arg = wifibroadcast::wifi_card_helper::read_line(
+        "HT mode (HT20/HT40+/HT40-, empty to skip): ");
+    const bool manual_rate = wifibroadcast::wifi_card_helper::prompt_yes_no(
+        "Manual rate test? (y/N): ", false);
+    if (manual_rate) {
+      mcs_override = wifibroadcast::wifi_card_helper::prompt_int(
+          "MCS index: ", 0, false);
+      while (true) {
+        const auto input =
+            wifibroadcast::wifi_card_helper::read_line("Rate in Mbit/s: ");
+        if (!input.empty()) {
+          rate_mbit = strtod(input.c_str(), nullptr);
+          if (rate_mbit > 0.0) {
+            break;
+          }
+        }
+        std::cout << "Invalid rate. Try again.\n";
+      }
+      duration_seconds = wifibroadcast::wifi_card_helper::prompt_int(
+          "Duration seconds (default 10): ", 10, true);
+    }
+  }
+  if (!interactive && !card_arg.empty()) {
+    if (wifibroadcast::wifi_card_helper::is_number(card_arg)) {
+      if (detected_cards.empty()) {
+        fprintf(stderr,
+                "No wifi cards detected, cannot resolve index %s\n",
+                card_arg.c_str());
+        return 1;
+      }
+      const size_t idx = static_cast<size_t>(std::stoul(card_arg));
+      if (idx >= detected_cards.size()) {
+        fprintf(stderr, "Wifi card index %zu out of range (0..%zu)\n", idx,
+                detected_cards.size() - 1);
+        return 1;
+      }
+      card = detected_cards[idx];
+    } else {
+      card = card_arg;
+      if (!detected_cards.empty() &&
+          std::find(detected_cards.begin(), detected_cards.end(), card) ==
+              detected_cards.end()) {
+        fprintf(stderr,
+                "Warning: interface %s not in detected list, continuing\n",
+                card.c_str());
+      }
+    }
+  } else if (!interactive && !detected_cards.empty()) {
+    card = detected_cards.front();
+  }
+  const auto normalized_ht =
+      wifibroadcast::wifi_card_helper::normalize_ht_mode(ht_mode_arg);
+  if (!ht_mode_arg.empty() && normalized_ht.empty()) {
+    fprintf(stderr, "Invalid HT mode: %s\n", ht_mode_arg.c_str());
+    return 1;
+  }
+  if (freq_mhz > 0) {
+    std::string err;
+    if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
+            card, freq_mhz, normalized_ht, &err)) {
+      fprintf(stderr, "Failed to set frequency: %s\n", err.c_str());
     }
   }
   std::cout << "Running on card " << card << "\n";
@@ -312,6 +421,11 @@ int main(int argc, char* const* argv) {
   options_txrx.tx_without_pcap = true;
 
   auto radiotap_header = std::make_shared<RadiotapHeaderTxHolder>();
+  const int bw_from_ht =
+      wifibroadcast::wifi_card_helper::ht_mode_to_bandwidth(normalized_ht);
+  if (bw_from_ht > 0) {
+    radiotap_header->update_channel_width(bw_from_ht);
+  }
   std::shared_ptr<WBTxRx> txrx =
       std::make_shared<WBTxRx>(cards, options_txrx, radiotap_header);
   // No idea if and what effect stbc and ldpc have on the rate, but openhd
@@ -337,8 +451,21 @@ int main(int argc, char* const* argv) {
   txrx->rx_register_callback(cb);
 
   // long_test(txrx, false);
+  if (rate_mbit > 0.0 || mcs_override >= 0) {
+    if (rate_mbit <= 0.0 || mcs_override < 0) {
+      fprintf(stderr,
+              "Both -m (mcs) and -r (rate_mbit) must be provided together\n");
+      return 1;
+    }
+    const int rate_kbits =
+        static_cast<int>(rate_mbit * 1000.0 + 0.5);
+    const auto res = validate_specific_rate(txrx, radiotap_header, mcs_override,
+                                            rate_kbits, duration_seconds);
+    std::cout << res << "\n";
+    return 0;
+  }
 
-  test_rates_and_print_results(txrx, radiotap_header, false);
+  test_rates_and_print_results(txrx, radiotap_header, bw_from_ht == 40);
   // test_rates_and_print_results(txrx, true);
 
   // validate_rtl8812au_rates(txrx, false);

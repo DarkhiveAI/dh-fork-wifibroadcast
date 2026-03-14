@@ -2,26 +2,101 @@
 // Created by consti10 on 07.10.23.
 // Uses WBTxRx to listen to all (openhd and non openhd) traffic
 //
+#include <algorithm>
+#include <cstdlib>
+
+#include "../src/HelperSources/WifiCardHelper.hpp"
 #include "../src/WBTxRx.h"
 #include "../src/wifibroadcast_spdlog.h"
 
 int main(int argc, char *const *argv) {
   std::string card = "wlxac9e17596103";
+  std::string card_arg;
+  bool list_cards = false;
+  int freq_mhz = 0;
+  std::string ht_mode_arg;
+  const bool interactive = (argc == 1);
   bool pcap_setdirection = true;
   int opt;
-  while ((opt = getopt(argc, argv, "w:d")) != -1) {
+  while ((opt = getopt(argc, argv, "w:lf:H:d")) != -1) {
     switch (opt) {
       case 'w':
-        card = optarg;
+        card_arg = optarg;
+        break;
+      case 'l':
+        list_cards = true;
+        break;
+      case 'f':
+        freq_mhz = atoi(optarg);
+        break;
+      case 'H':
+        ht_mode_arg = optarg;
         break;
       case 'd':
         pcap_setdirection = false;
         break;
       default: /* '?' */
       show_usage:
-        fprintf(stderr, "test_listen -w [wifi card to listen on] %s\n",
+        fprintf(stderr,
+                "test_listen %s [-w iface|index] [-l] [-f freq_mhz]\n"
+                "  [-H HT20|HT40+|HT40-] [-d]\n",
                 argv[0]);
         exit(1);
+    }
+  }
+  const auto detected_cards =
+      wifibroadcast::wifi_card_helper::list_wifi_cards();
+  if (list_cards) {
+    std::cout << wifibroadcast::wifi_card_helper::format_card_list(
+        detected_cards);
+    return 0;
+  }
+  if (interactive) {
+    card = wifibroadcast::wifi_card_helper::prompt_select_card(detected_cards);
+    freq_mhz = wifibroadcast::wifi_card_helper::prompt_int(
+        "Set frequency MHz (empty to skip): ", 0, true);
+    ht_mode_arg = wifibroadcast::wifi_card_helper::read_line(
+        "HT mode (HT20/HT40+/HT40-, empty to skip): ");
+  }
+  if (!interactive && !card_arg.empty()) {
+    if (wifibroadcast::wifi_card_helper::is_number(card_arg)) {
+      if (detected_cards.empty()) {
+        fprintf(stderr,
+                "No wifi cards detected, cannot resolve index %s\n",
+                card_arg.c_str());
+        return 1;
+      }
+      const size_t idx = static_cast<size_t>(std::stoul(card_arg));
+      if (idx >= detected_cards.size()) {
+        fprintf(stderr, "Wifi card index %zu out of range (0..%zu)\n", idx,
+                detected_cards.size() - 1);
+        return 1;
+      }
+      card = detected_cards[idx];
+    } else {
+      card = card_arg;
+      if (!detected_cards.empty() &&
+          std::find(detected_cards.begin(), detected_cards.end(), card) ==
+              detected_cards.end()) {
+        fprintf(stderr,
+                "Warning: interface %s not in detected list, continuing\n",
+                card.c_str());
+      }
+    }
+  } else if (!interactive && !detected_cards.empty()) {
+    card = detected_cards.front();
+  }
+  const auto normalized_ht =
+      wifibroadcast::wifi_card_helper::normalize_ht_mode(ht_mode_arg);
+  if (!ht_mode_arg.empty() && normalized_ht.empty()) {
+    fprintf(stderr, "Invalid HT mode: %s\n", ht_mode_arg.c_str());
+    return 1;
+  }
+  if (freq_mhz > 0) {
+    std::string err;
+    if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
+            card, freq_mhz, normalized_ht, &err)) {
+      fprintf(stderr, "Failed to set frequency: %s\n", err.c_str());
     }
   }
 
