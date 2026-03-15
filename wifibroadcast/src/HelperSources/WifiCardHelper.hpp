@@ -182,8 +182,86 @@ inline std::optional<int> get_current_frequency_mhz(
 #endif
 }
 
+inline std::optional<std::string> get_device_mode(
+    const std::string &iface) {
+#if defined(__linux__)
+  const auto out_opt = run_command_output("iw dev " + iface + " info");
+  if (!out_opt.has_value()) {
+    return std::nullopt;
+  }
+  std::istringstream iss(out_opt.value());
+  std::string line;
+  while (std::getline(iss, line)) {
+    const auto pos = line.find("type ");
+    if (pos == std::string::npos) {
+      continue;
+    }
+    std::string mode = trim_copy(line.substr(pos + 5));
+    if (!mode.empty()) {
+      return mode;
+    }
+  }
+  return std::nullopt;
+#else
+  (void)iface;
+  return std::nullopt;
+#endif
+}
+
+inline bool run_command_simple(const std::string &command) {
+  const int ret = std::system(command.c_str());
+  return ret == 0;
+}
+
+inline bool ensure_monitor_mode(const std::string &iface,
+                                std::string *error_out) {
+#if defined(__linux__)
+  const auto mode_opt = get_device_mode(iface);
+  if (mode_opt.has_value() && mode_opt.value() == "monitor") {
+    return true;
+  }
+  if (!run_command_simple("ip link set dev " + iface + " down")) {
+    if (error_out) {
+      *error_out = "failed to bring interface down";
+    }
+    return false;
+  }
+  if (!run_command_simple("iw dev " + iface + " set monitor otherbss")) {
+    if (error_out) {
+      *error_out = "failed to set monitor mode";
+    }
+    return false;
+  }
+  if (!run_command_simple("ip link set dev " + iface + " up")) {
+    if (error_out) {
+      *error_out = "failed to bring interface up";
+    }
+    return false;
+  }
+  const auto updated_mode = get_device_mode(iface);
+  if (updated_mode.has_value() && updated_mode.value() == "monitor") {
+    return true;
+  }
+  if (error_out) {
+    *error_out = "device not in monitor mode after update";
+  }
+  return false;
+#else
+  (void)iface;
+  if (error_out) {
+    *error_out = "monitor mode not supported on this platform";
+  }
+  return false;
+#endif
+}
+
 inline std::string prompt_select_card(
     const std::vector<std::string> &detected_cards) {
+  if (detected_cards.size() == 1) {
+    std::cout << "Using only detected card: " << detected_cards.front()
+              << "\n";
+    return detected_cards.front();
+  }
   if (!detected_cards.empty()) {
     std::cout << format_card_list(detected_cards);
     while (true) {
@@ -427,6 +505,15 @@ inline bool apply_iw_freq_and_ht(const std::string &iface, int freq_mhz,
     return true;
   }
 #if defined(__linux__)
+  {
+    std::string monitor_err;
+    if (!ensure_monitor_mode(iface, &monitor_err)) {
+      if (error_out) {
+        *error_out = "monitor mode required: " + monitor_err;
+      }
+      return false;
+    }
+  }
   const int bw =
       ht_mode_to_bandwidth(normalized_ht_mode.empty() ? "HT20"
                                                       : normalized_ht_mode);

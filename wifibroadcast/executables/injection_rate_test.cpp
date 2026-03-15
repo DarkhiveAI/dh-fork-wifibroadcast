@@ -127,6 +127,118 @@ static void draw_bar(WINDOW *win, int y, int x, int width, double value,
   wattroff(win, COLOR_PAIR(color_pair));
 }
 
+static int select_band_ui() {
+  nodelay(stdscr, false);
+  keypad(stdscr, true);
+  int rows = 0;
+  int cols = 0;
+  getmaxyx(stdscr, rows, cols);
+  const std::string title = "Select Band (Enter to choose, q to cancel)";
+  const std::vector<std::string> bands = {"2.4 GHz", "5.8 GHz"};
+  int idx = 0;
+  while (true) {
+    erase();
+    mvprintw(0, 0, "%s", title.c_str());
+    for (int i = 0; i < static_cast<int>(bands.size()); i++) {
+      if (i == idx) {
+        attron(A_REVERSE);
+      }
+      mvprintw(2 + i, 2, "%s", bands[i].c_str());
+      if (i == idx) {
+        attroff(A_REVERSE);
+      }
+    }
+    refresh();
+    const int ch = getch();
+    if (ch == 'q' || ch == 27) {
+      nodelay(stdscr, true);
+      return -1;
+    }
+    if (ch == KEY_UP) {
+      idx = (idx == 0) ? static_cast<int>(bands.size() - 1) : idx - 1;
+    } else if (ch == KEY_DOWN) {
+      idx = (idx + 1) % static_cast<int>(bands.size());
+    } else if (ch == '\n' || ch == KEY_ENTER) {
+      nodelay(stdscr, true);
+      return idx;
+    }
+  }
+}
+
+static int select_frequency_ui(const std::vector<int> &frequencies,
+                               int current_value) {
+  if (frequencies.empty()) {
+    return -1;
+  }
+  nodelay(stdscr, false);
+  keypad(stdscr, true);
+  int rows = 0;
+  int cols = 0;
+  getmaxyx(stdscr, rows, cols);
+  int idx = 0;
+  for (int i = 0; i < static_cast<int>(frequencies.size()); i++) {
+    if (frequencies[i] == current_value) {
+      idx = i;
+      break;
+    }
+  }
+  while (true) {
+    erase();
+    mvprintw(0, 0, "Select Frequency (Enter to choose, q to cancel)");
+    const int list_start_y = 2;
+    const int list_height = std::max(4, rows - list_start_y - 2);
+    const int max_start =
+        std::max(0, static_cast<int>(frequencies.size()) - list_height);
+    int start = idx - list_height / 2;
+    if (start < 0) start = 0;
+    if (start > max_start) start = max_start;
+    for (int i = 0; i < list_height; i++) {
+      const int item_index = start + i;
+      if (item_index >= static_cast<int>(frequencies.size())) {
+        break;
+      }
+      if (item_index == idx) {
+        attron(A_REVERSE);
+      }
+      mvprintw(list_start_y + i, 2, "%d MHz", frequencies[item_index]);
+      if (item_index == idx) {
+        attroff(A_REVERSE);
+      }
+    }
+    refresh();
+    const int ch = getch();
+    if (ch == 'q' || ch == 27) {
+      nodelay(stdscr, true);
+      return -1;
+    }
+    if (ch == KEY_UP) {
+      idx = (idx == 0) ? static_cast<int>(frequencies.size() - 1) : idx - 1;
+    } else if (ch == KEY_DOWN) {
+      idx = (idx + 1) % static_cast<int>(frequencies.size());
+    } else if (ch == KEY_NPAGE) {
+      idx = std::min(static_cast<int>(frequencies.size() - 1),
+                     idx + list_height);
+    } else if (ch == KEY_PPAGE) {
+      idx = std::max(0, idx - list_height);
+    } else if (ch == '\n' || ch == KEY_ENTER) {
+      nodelay(stdscr, true);
+      return frequencies[idx];
+    }
+  }
+}
+
+static std::vector<int> get_freqs_2g() {
+  return {2412, 2417, 2422, 2427, 2432, 2437, 2442,
+          2447, 2452, 2457, 2462, 2467, 2472, 2484};
+}
+
+static std::vector<int> get_freqs_5g() {
+  return {5180, 5200, 5220, 5240, 5260, 5280, 5300, 5320,
+          5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640,
+          5660, 5680, 5700, 5720, 5745, 5765, 5785, 5805,
+          5825, 5845, 5865};
+}
+
 static std::string ui_prompt_line(UiLayout &layout, const std::string &prompt) {
   nodelay(stdscr, false);
   werase(layout.footer);
@@ -146,6 +258,7 @@ static std::string ui_prompt_line(UiLayout &layout, const std::string &prompt) {
 
 static void render_ui(const UiLayout &layout, const std::string &card,
                       int target_freq_mhz, int current_freq_mhz,
+                      const std::string &device_mode,
                       const std::string &ht_mode, int bandwidth, int mcs,
                       int payload_size, double target_rate_mbit, int target_pps,
                       const WBTxRx::TxStats &txstats, int cannot_keep_up,
@@ -172,24 +285,27 @@ static void render_ui(const UiLayout &layout, const std::string &card,
   box(layout.settings, 0, 0);
   mvwprintw(layout.settings, 0, 2, "Settings");
   mvwprintw(layout.settings, 1, 2, "Card: %s", card.c_str());
+  mvwprintw(layout.settings, 2, 2, "Mode: %s",
+            device_mode.empty() ? "-" : device_mode.c_str());
   if (current_freq_mhz > 0) {
     if (target_freq_mhz > 0) {
-      mvwprintw(layout.settings, 2, 2, "Freq: %d MHz (target %d)",
+      mvwprintw(layout.settings, 3, 2, "Freq: %d MHz (target %d)",
                 current_freq_mhz, target_freq_mhz);
     } else {
-      mvwprintw(layout.settings, 2, 2, "Freq: %d MHz", current_freq_mhz);
+      mvwprintw(layout.settings, 3, 2, "Freq: %d MHz", current_freq_mhz);
     }
   } else if (target_freq_mhz > 0) {
-    mvwprintw(layout.settings, 2, 2, "Freq: %d MHz", target_freq_mhz);
+    mvwprintw(layout.settings, 3, 2, "Freq: %d MHz", target_freq_mhz);
   } else {
-    mvwprintw(layout.settings, 2, 2, "Freq: -");
+    mvwprintw(layout.settings, 3, 2, "Freq: -");
   }
-  mvwprintw(layout.settings, 3, 2, "HT: %s", ht_mode.empty() ? "-" : ht_mode.c_str());
-  mvwprintw(layout.settings, 4, 2, "BW: %d MHz", bandwidth);
-  mvwprintw(layout.settings, 5, 2, "MCS: %d", mcs);
-  mvwprintw(layout.settings, 6, 2, "Payload: %d bytes", payload_size);
-  mvwprintw(layout.settings, 7, 2, "Target: %.2f Mbit/s", target_rate_mbit);
-  mvwprintw(layout.settings, 8, 2, "Target PPS: %d", target_pps);
+  mvwprintw(layout.settings, 4, 2, "HT: %s",
+            ht_mode.empty() ? "-" : ht_mode.c_str());
+  mvwprintw(layout.settings, 5, 2, "BW: %d MHz", bandwidth);
+  mvwprintw(layout.settings, 6, 2, "MCS: %d", mcs);
+  mvwprintw(layout.settings, 7, 2, "Payload: %d bytes", payload_size);
+  mvwprintw(layout.settings, 8, 2, "Target: %.2f Mbit/s", target_rate_mbit);
+  mvwprintw(layout.settings, 9, 2, "Target PPS: %d", target_pps);
 
   box(layout.stats, 0, 0);
   mvwprintw(layout.stats, 0, 2, "Live Stats");
@@ -260,6 +376,12 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
 
   hdr->update_channel_width(bandwidth);
   hdr->update_mcs_index(mcs);
+  {
+    std::string err;
+    if (!wifibroadcast::wifi_card_helper::ensure_monitor_mode(card, &err)) {
+      status_line = "Monitor mode required: " + err;
+    }
+  }
 
   auto tx_cb = [&txrx, &hdr](const uint8_t *data, int data_len) {
     const auto radiotap_header = hdr->thread_safe_get();
@@ -284,6 +406,7 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
 
   bool running = true;
   int current_freq_mhz = -1;
+  std::string device_mode;
   auto last_freq_poll = std::chrono::steady_clock::now();
   while (running) {
     int rows = 0;
@@ -322,12 +445,17 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           }
           break;
         case 'f': {
-          const auto input = ui_prompt_line(layout,
-                                            "Frequency MHz (0 to skip): ");
-          if (!input.empty()) {
-            const int new_freq = atoi(input.c_str());
-            freq_mhz = new_freq;
-            if (freq_mhz > 0) {
+          if (injecting) {
+            stream_generator->stop();
+          }
+          const int band = select_band_ui();
+          if (band >= 0) {
+            const auto freqs = (band == 0) ? get_freqs_2g() : get_freqs_5g();
+            const int selected =
+                select_frequency_ui(freqs, freq_mhz > 0 ? freq_mhz
+                                                        : current_freq_mhz);
+            if (selected > 0) {
+              freq_mhz = selected;
               std::string err;
               if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
                       card, freq_mhz, ht_mode, &err)) {
@@ -335,9 +463,15 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
               }
             }
           }
+          if (injecting) {
+            stream_generator->start();
+          }
           break;
         }
         case 'h': {
+          if (injecting) {
+            stream_generator->stop();
+          }
           const auto input =
               ui_prompt_line(layout, "HT mode (HT20/HT40+/HT40-): ");
           if (!input.empty()) {
@@ -362,6 +496,9 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
                 }
               }
             }
+          }
+          if (injecting) {
+            stream_generator->start();
           }
           break;
         }
@@ -399,7 +536,14 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
         case 's':
           injecting = !injecting;
           if (injecting) {
-            stream_generator->start();
+            std::string err;
+            if (!wifibroadcast::wifi_card_helper::ensure_monitor_mode(
+                    card, &err)) {
+              injecting = false;
+              status_line = "Monitor mode required: " + err;
+            } else {
+              stream_generator->start();
+            }
           } else {
             stream_generator->stop();
           }
@@ -416,14 +560,19 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
       if (freq_opt.has_value()) {
         current_freq_mhz = freq_opt.value();
       }
+      const auto mode_opt =
+          wifibroadcast::wifi_card_helper::get_device_mode(card);
+      if (mode_opt.has_value()) {
+        device_mode = mode_opt.value();
+      }
       last_freq_poll = now;
     }
 
     const auto txstats = txrx->get_tx_stats();
-    render_ui(layout, card, freq_mhz, current_freq_mhz, ht_mode, bandwidth,
-              mcs, payload_size, target_rate_mbit, target_pps, txstats,
-              stream_generator->n_times_cannot_keep_up_wanted_pps, injecting,
-              status_line);
+    render_ui(layout, card, freq_mhz, current_freq_mhz, device_mode, ht_mode,
+              bandwidth, mcs, payload_size, target_rate_mbit, target_pps,
+              txstats, stream_generator->n_times_cannot_keep_up_wanted_pps,
+              injecting, status_line);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
   }
 
