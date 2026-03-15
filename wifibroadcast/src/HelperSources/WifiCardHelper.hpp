@@ -119,6 +119,12 @@ inline std::string read_line(const std::string &prompt) {
   return trim_copy(line);
 }
 
+// Forward declarations for helpers used below.
+inline std::optional<int> read_sysfs_int(const char *path);
+inline int channel_to_frequency_maybe(int channel);
+struct OpenhdOverridePaths;
+inline std::optional<OpenhdOverridePaths> detect_openhd_override_paths();
+
 inline std::optional<std::string> run_command_output(
     const std::string &command) {
 #if defined(__linux__)
