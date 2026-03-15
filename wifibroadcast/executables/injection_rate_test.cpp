@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <thread>
+
+#include <ncurses.h>
 
 #include "../src/WBStreamRx.h"
 #include "../src/WBStreamTx.h"
@@ -36,6 +39,249 @@ struct TestResult {
   int fail_pps_measured;
   int fail_bps_measured;
 };
+
+static int clamp_payload_size(int size_bytes) {
+  if (size_bytes < 1) {
+    return 1;
+  }
+  if (size_bytes > WBTxRx::MAX_PACKET_PAYLOAD_SIZE) {
+    return WBTxRx::MAX_PACKET_PAYLOAD_SIZE;
+  }
+  return size_bytes;
+}
+
+static int calculate_target_pps(double rate_mbit, int payload_size) {
+  if (rate_mbit <= 0.0) {
+    return 1;
+  }
+  if (payload_size < 1) {
+    payload_size = 1;
+  }
+  const double rate_bps = rate_mbit * 1000.0 * 1000.0;
+  const int pps =
+      static_cast<int>(rate_bps / (static_cast<double>(payload_size) * 8.0));
+  return std::max(1, pps);
+}
+
+static std::string ui_prompt_line(const std::string &prompt) {
+  int rows = 0;
+  int cols = 0;
+  getmaxyx(stdscr, rows, cols);
+  move(rows - 1, 0);
+  clrtoeol();
+  mvprintw(rows - 1, 0, "%s", prompt.c_str());
+  echo();
+  curs_set(1);
+  char buf[128] = {};
+  getnstr(buf, sizeof(buf) - 1);
+  noecho();
+  curs_set(0);
+  return wifibroadcast::wifi_card_helper::trim_copy(buf);
+}
+
+static void render_ui(const std::string &card, int freq_mhz,
+                      const std::string &ht_mode, int bandwidth, int mcs,
+                      int payload_size, double target_rate_mbit, int target_pps,
+                      const WBTxRx::TxStats &txstats, int cannot_keep_up,
+                      bool injecting, const std::string &status_line) {
+  erase();
+  mvprintw(0, 0, "WiFi Injection UI (q to quit)");
+  mvprintw(2, 0, "Card: %s", card.c_str());
+  mvprintw(3, 0, "Freq: %d MHz   HT: %s   BW: %d MHz", freq_mhz,
+           ht_mode.empty() ? "-" : ht_mode.c_str(), bandwidth);
+  mvprintw(4, 0, "MCS: %d   Payload: %d bytes", mcs, payload_size);
+  mvprintw(5, 0, "Target rate: %.2f Mbit/s   Target PPS: %d", target_rate_mbit,
+           target_pps);
+  mvprintw(7, 0, "TX PPS: %d   TX bitrate: %s", txstats.curr_packets_per_second,
+           StringHelper::bitrate_readable(
+               txstats.curr_bits_per_second_excluding_overhead)
+               .c_str());
+  mvprintw(8, 0, "TX errors: %d   Cannot keep up: %d",
+           txstats.count_tx_injections_error_hint, cannot_keep_up);
+  mvprintw(9, 0, "Injecting: %s", injecting ? "YES" : "NO");
+  mvprintw(11, 0, "Keys:");
+  mvprintw(12, 2, "m/M: MCS -/+");
+  mvprintw(13, 2, "b: toggle BW 20/40");
+  mvprintw(14, 2, "f: set frequency");
+  mvprintw(15, 2, "h: set HT mode (HT20/HT40+/HT40-)");
+  mvprintw(16, 2, "r: set target rate (Mbit/s)");
+  mvprintw(17, 2, "p: set payload size (bytes)");
+  mvprintw(18, 2, "s: start/stop injection");
+  if (!status_line.empty()) {
+    mvprintw(20, 0, "%s", status_line.c_str());
+  }
+  refresh();
+}
+
+static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
+                          const std::string &initial_ht_mode,
+                          std::shared_ptr<WBTxRx> txrx,
+                          std::shared_ptr<RadiotapHeaderTxHolder> hdr,
+                          int initial_payload_size, int initial_mcs,
+                          double initial_rate_mbit) {
+  int freq_mhz = initial_freq_mhz;
+  std::string ht_mode = initial_ht_mode;
+  int bandwidth = wifibroadcast::wifi_card_helper::ht_mode_to_bandwidth(
+      ht_mode.empty() ? "HT20" : ht_mode);
+  if (bandwidth <= 0) {
+    bandwidth = 20;
+  }
+  int mcs = std::max(0, initial_mcs);
+  int payload_size = clamp_payload_size(initial_payload_size);
+  double target_rate_mbit = initial_rate_mbit > 0.0 ? initial_rate_mbit : 10.0;
+  int target_pps = calculate_target_pps(target_rate_mbit, payload_size);
+  bool injecting = true;
+  std::string status_line;
+
+  hdr->update_channel_width(bandwidth);
+  hdr->update_mcs_index(mcs);
+
+  auto tx_cb = [&txrx, &hdr](const uint8_t *data, int data_len) {
+    const auto radiotap_header = hdr->thread_safe_get();
+    const bool encrypt = false;
+    txrx->tx_inject_packet(10, data, data_len, radiotap_header, encrypt);
+  };
+
+  auto stream_generator =
+      std::make_unique<DummyStreamGenerator>(tx_cb, payload_size);
+  stream_generator->set_target_pps(target_pps);
+  stream_generator->start();
+
+  initscr();
+  cbreak();
+  noecho();
+  keypad(stdscr, true);
+  nodelay(stdscr, true);
+  curs_set(0);
+
+  bool running = true;
+  while (running) {
+    int ch = getch();
+    if (ch != ERR) {
+      status_line.clear();
+      switch (ch) {
+        case 'q':
+          running = false;
+          break;
+        case 'm':
+          if (mcs > 0) {
+            mcs--;
+            hdr->update_mcs_index(mcs);
+          }
+          break;
+        case 'M':
+          if (mcs < 31) {
+            mcs++;
+            hdr->update_mcs_index(mcs);
+          }
+          break;
+        case 'b':
+          bandwidth = (bandwidth == 20) ? 40 : 20;
+          hdr->update_channel_width(bandwidth);
+          if (bandwidth == 20) {
+            ht_mode = "HT20";
+          } else if (ht_mode != "HT40+" && ht_mode != "HT40-") {
+            ht_mode = "HT40+";
+          }
+          break;
+        case 'f': {
+          const auto input = ui_prompt_line("Frequency MHz (0 to skip): ");
+          if (!input.empty()) {
+            const int new_freq = atoi(input.c_str());
+            freq_mhz = new_freq;
+            if (freq_mhz > 0) {
+              std::string err;
+              if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
+                      card, freq_mhz, ht_mode, &err)) {
+                status_line = "Failed to set frequency: " + err;
+              }
+            }
+          }
+          break;
+        }
+        case 'h': {
+          const auto input = ui_prompt_line("HT mode (HT20/HT40+/HT40-): ");
+          if (!input.empty()) {
+            const auto normalized =
+                wifibroadcast::wifi_card_helper::normalize_ht_mode(input);
+            if (normalized.empty()) {
+              status_line = "Invalid HT mode.";
+            } else {
+              ht_mode = normalized;
+              const int bw =
+                  wifibroadcast::wifi_card_helper::ht_mode_to_bandwidth(
+                      ht_mode);
+              if (bw > 0) {
+                bandwidth = bw;
+                hdr->update_channel_width(bandwidth);
+              }
+              if (freq_mhz > 0) {
+                std::string err;
+                if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
+                        card, freq_mhz, ht_mode, &err)) {
+                  status_line = "Failed to set HT mode: " + err;
+                }
+              }
+            }
+          }
+          break;
+        }
+        case 'r': {
+          const auto input = ui_prompt_line("Target rate Mbit/s: ");
+          if (!input.empty()) {
+            const double new_rate = strtod(input.c_str(), nullptr);
+            if (new_rate > 0.0) {
+              target_rate_mbit = new_rate;
+              target_pps =
+                  calculate_target_pps(target_rate_mbit, payload_size);
+              stream_generator->set_target_pps(target_pps);
+            } else {
+              status_line = "Invalid rate.";
+            }
+          }
+          break;
+        }
+        case 'p': {
+          const auto input = ui_prompt_line("Payload size bytes: ");
+          if (!input.empty()) {
+            const int new_size = clamp_payload_size(atoi(input.c_str()));
+            if (new_size > 0) {
+              payload_size = new_size;
+              stream_generator->set_packet_size(payload_size);
+              target_pps =
+                  calculate_target_pps(target_rate_mbit, payload_size);
+              stream_generator->set_target_pps(target_pps);
+            } else {
+              status_line = "Invalid payload size.";
+            }
+          }
+          break;
+        }
+        case 's':
+          injecting = !injecting;
+          if (injecting) {
+            stream_generator->start();
+          } else {
+            stream_generator->stop();
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    const auto txstats = txrx->get_tx_stats();
+    render_ui(card, freq_mhz, ht_mode, bandwidth, mcs, payload_size,
+              target_rate_mbit, target_pps, txstats,
+              stream_generator->n_times_cannot_keep_up_wanted_pps, injecting,
+              status_line);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
+
+  stream_generator->stop();
+  endwin();
+  return 0;
+}
 
 static TestResult increase_pps_until_fail(
     std::shared_ptr<WBTxRx> txrx, std::shared_ptr<RadiotapHeaderTxHolder> hdr,
@@ -301,15 +547,19 @@ int main(int argc, char* const* argv) {
   int mcs_override = -1;
   double rate_mbit = -1.0;
   int duration_seconds = 10;
-  const bool interactive = (argc == 1);
+  int payload_size = TEST_PACKETS_SIZE;
+  bool ui_mode = (argc == 1);
   int opt;
-  while ((opt = getopt(argc, argv, "w:lf:H:m:r:t:")) != -1) {
+  while ((opt = getopt(argc, argv, "w:lf:H:m:r:t:p:U")) != -1) {
     switch (opt) {
       case 'w':
         card_arg = optarg;
         break;
       case 'l':
         list_cards = true;
+        break;
+      case 'U':
+        ui_mode = true;
         break;
       case 'f':
         freq_mhz = atoi(optarg);
@@ -326,11 +576,15 @@ int main(int argc, char* const* argv) {
       case 't':
         duration_seconds = atoi(optarg);
         break;
+      case 'p':
+        payload_size = atoi(optarg);
+        break;
       default: /* '?' */
       show_usage:
         fprintf(stderr,
                 "injection rate test %s [-w iface|index] [-l] [-f freq_mhz]\n"
-                "  [-H HT20|HT40+|HT40-] [-m mcs] [-r rate_mbit] [-t seconds]\n",
+                "  [-H HT20|HT40+|HT40-] [-m mcs] [-r rate_mbit] [-t seconds]\n"
+                "  [-p payload_bytes] [-U]\n",
                 argv[0]);
         exit(1);
     }
@@ -342,33 +596,7 @@ int main(int argc, char* const* argv) {
         detected_cards);
     return 0;
   }
-  if (interactive) {
-    card = wifibroadcast::wifi_card_helper::prompt_select_card(detected_cards);
-    freq_mhz = wifibroadcast::wifi_card_helper::prompt_int(
-        "Set frequency MHz (empty to skip): ", 0, true);
-    ht_mode_arg = wifibroadcast::wifi_card_helper::read_line(
-        "HT mode (HT20/HT40+/HT40-, empty to skip): ");
-    const bool manual_rate = wifibroadcast::wifi_card_helper::prompt_yes_no(
-        "Manual rate test? (y/N): ", false);
-    if (manual_rate) {
-      mcs_override = wifibroadcast::wifi_card_helper::prompt_int(
-          "MCS index: ", 0, false);
-      while (true) {
-        const auto input =
-            wifibroadcast::wifi_card_helper::read_line("Rate in Mbit/s: ");
-        if (!input.empty()) {
-          rate_mbit = strtod(input.c_str(), nullptr);
-          if (rate_mbit > 0.0) {
-            break;
-          }
-        }
-        std::cout << "Invalid rate. Try again.\n";
-      }
-      duration_seconds = wifibroadcast::wifi_card_helper::prompt_int(
-          "Duration seconds (default 10): ", 10, true);
-    }
-  }
-  if (!interactive && !card_arg.empty()) {
+  if (!card_arg.empty()) {
     if (wifibroadcast::wifi_card_helper::is_number(card_arg)) {
       if (detected_cards.empty()) {
         fprintf(stderr,
@@ -393,11 +621,16 @@ int main(int argc, char* const* argv) {
                 card.c_str());
       }
     }
-  } else if (!interactive && !detected_cards.empty()) {
+  } else if (ui_mode) {
+    card = wifibroadcast::wifi_card_helper::prompt_select_card(detected_cards);
+  } else if (!detected_cards.empty()) {
     card = detected_cards.front();
   }
-  const auto normalized_ht =
+  auto normalized_ht =
       wifibroadcast::wifi_card_helper::normalize_ht_mode(ht_mode_arg);
+  if (ui_mode && normalized_ht.empty()) {
+    normalized_ht = "HT20";
+  }
   if (!ht_mode_arg.empty() && normalized_ht.empty()) {
     fprintf(stderr, "Invalid HT mode: %s\n", ht_mode_arg.c_str());
     return 1;
@@ -449,6 +682,13 @@ int main(int argc, char* const* argv) {
         // fmt::print("Got packet[{}]\n",message);
       };
   txrx->rx_register_callback(cb);
+
+  if (ui_mode) {
+    const int initial_mcs = (mcs_override >= 0) ? mcs_override : 3;
+    const double initial_rate = (rate_mbit > 0.0) ? rate_mbit : 10.0;
+    return run_ncurses_ui(card, freq_mhz, normalized_ht, txrx, radiotap_header,
+                          payload_size, initial_mcs, initial_rate);
+  }
 
   // long_test(txrx, false);
   if (rate_mbit > 0.0 || mcs_override >= 0) {

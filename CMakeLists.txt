@@ -37,7 +37,9 @@ add_executable(example_udp wifibroadcast/executables/example_udp.cpp)
 target_link_libraries(example_udp PRIVATE ${WB_TARGET_LINK_LIBRARIES})
 
 add_executable(injection_rate_test wifibroadcast/executables/injection_rate_test.cpp)
-target_link_libraries(injection_rate_test PRIVATE ${WB_TARGET_LINK_LIBRARIES})
+find_package(Curses REQUIRED)
+target_include_directories(injection_rate_test PRIVATE ${CURSES_INCLUDE_DIRS})
+target_link_libraries(injection_rate_test PRIVATE ${WB_TARGET_LINK_LIBRARIES} ${CURSES_LIBRARIES})
 
 add_executable(example_pollute wifibroadcast/executables/example_pollute.cpp)
 target_link_libraries(example_pollute PRIVATE ${WB_TARGET_LINK_LIBRARIES})
