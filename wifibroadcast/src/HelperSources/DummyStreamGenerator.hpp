@@ -104,7 +104,7 @@ class DummyStreamGenerator {
   std::atomic<int> m_target_pps = 100;
   std::atomic<int> m_packet_size = 1400;
   std::unique_ptr<std::thread> m_producer_thread;
-  std::atomic<std::shared_ptr<RandomBufferPot>> m_random_buffer_pot;
+  std::shared_ptr<RandomBufferPot> m_random_buffer_pot;
   bool m_terminate = false;
   std::atomic<bool> m_running = false;
 };
