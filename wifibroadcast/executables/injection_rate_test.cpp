@@ -239,6 +239,18 @@ static std::vector<int> get_freqs_5g() {
           5825, 5845, 5865};
 }
 
+static std::string suggest_ht40_mode(int freq_mhz) {
+  const int channel =
+      wifibroadcast::wifi_card_helper::frequency_to_channel_maybe(freq_mhz);
+  if (channel <= 0) {
+    return "HT40+";
+  }
+  if (freq_mhz < 3000) {
+    return (channel <= 7) ? "HT40+" : "HT40-";
+  }
+  return (channel % 8 == 4) ? "HT40+" : "HT40-";
+}
+
 static std::string ui_prompt_line(UiLayout &layout, const std::string &prompt) {
   nodelay(stdscr, false);
   werase(layout.footer);
@@ -259,6 +271,7 @@ static std::string ui_prompt_line(UiLayout &layout, const std::string &prompt) {
 static void render_ui(const UiLayout &layout, const std::string &card,
                       int target_freq_mhz, int current_freq_mhz,
                       const std::string &device_mode,
+                      const std::string &override_info,
                       const std::string &ht_mode, int bandwidth, int mcs,
                       int payload_size, double target_rate_mbit, int target_pps,
                       const WBTxRx::TxStats &txstats, int cannot_keep_up,
@@ -287,25 +300,27 @@ static void render_ui(const UiLayout &layout, const std::string &card,
   mvwprintw(layout.settings, 1, 2, "Card: %s", card.c_str());
   mvwprintw(layout.settings, 2, 2, "Mode: %s",
             device_mode.empty() ? "-" : device_mode.c_str());
+  mvwprintw(layout.settings, 3, 2, "Override: %s",
+            override_info.empty() ? "-" : override_info.c_str());
   if (current_freq_mhz > 0) {
     if (target_freq_mhz > 0) {
-      mvwprintw(layout.settings, 3, 2, "Freq: %d MHz (target %d)",
+      mvwprintw(layout.settings, 4, 2, "Freq: %d MHz (target %d)",
                 current_freq_mhz, target_freq_mhz);
     } else {
-      mvwprintw(layout.settings, 3, 2, "Freq: %d MHz", current_freq_mhz);
+      mvwprintw(layout.settings, 4, 2, "Freq: %d MHz", current_freq_mhz);
     }
   } else if (target_freq_mhz > 0) {
-    mvwprintw(layout.settings, 3, 2, "Freq: %d MHz", target_freq_mhz);
+    mvwprintw(layout.settings, 4, 2, "Freq: %d MHz", target_freq_mhz);
   } else {
-    mvwprintw(layout.settings, 3, 2, "Freq: -");
+    mvwprintw(layout.settings, 4, 2, "Freq: -");
   }
-  mvwprintw(layout.settings, 4, 2, "HT: %s",
+  mvwprintw(layout.settings, 5, 2, "HT: %s",
             ht_mode.empty() ? "-" : ht_mode.c_str());
-  mvwprintw(layout.settings, 5, 2, "BW: %d MHz", bandwidth);
-  mvwprintw(layout.settings, 6, 2, "MCS: %d", mcs);
-  mvwprintw(layout.settings, 7, 2, "Payload: %d bytes", payload_size);
-  mvwprintw(layout.settings, 8, 2, "Target: %.2f Mbit/s", target_rate_mbit);
-  mvwprintw(layout.settings, 9, 2, "Target PPS: %d", target_pps);
+  mvwprintw(layout.settings, 6, 2, "BW: %d MHz", bandwidth);
+  mvwprintw(layout.settings, 7, 2, "MCS: %d", mcs);
+  mvwprintw(layout.settings, 8, 2, "Payload: %d bytes", payload_size);
+  mvwprintw(layout.settings, 9, 2, "Target: %.2f Mbit/s", target_rate_mbit);
+  mvwprintw(layout.settings, 10, 2, "Target PPS: %d", target_pps);
 
   box(layout.stats, 0, 0);
   mvwprintw(layout.stats, 0, 2, "Live Stats");
@@ -380,6 +395,7 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
     std::string err;
     if (!wifibroadcast::wifi_card_helper::ensure_monitor_mode(card, &err)) {
       status_line = "Monitor mode required: " + err;
+      injecting = false;
     }
   }
 
@@ -392,7 +408,9 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
   auto stream_generator =
       std::make_unique<DummyStreamGenerator>(tx_cb, payload_size);
   stream_generator->set_target_pps(target_pps);
-  stream_generator->start();
+  if (injecting) {
+    stream_generator->start();
+  }
 
   initscr();
   cbreak();
@@ -407,6 +425,8 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
   bool running = true;
   int current_freq_mhz = -1;
   std::string device_mode;
+  std::string override_info;
+  bool rx_running = true;
   auto last_freq_poll = std::chrono::steady_clock::now();
   while (running) {
     int rows = 0;
@@ -440,13 +460,19 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           hdr->update_channel_width(bandwidth);
           if (bandwidth == 20) {
             ht_mode = "HT20";
-          } else if (ht_mode != "HT40+" && ht_mode != "HT40-") {
-            ht_mode = "HT40+";
+          } else {
+            const int freq_for_hint =
+                (freq_mhz > 0) ? freq_mhz : current_freq_mhz;
+            ht_mode = suggest_ht40_mode(freq_for_hint);
           }
           break;
         case 'f': {
           if (injecting) {
             stream_generator->stop();
+          }
+          if (rx_running) {
+            txrx->stop_receiving();
+            rx_running = false;
           }
           const int band = select_band_ui();
           if (band >= 0) {
@@ -456,12 +482,20 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
                                                         : current_freq_mhz);
             if (selected > 0) {
               freq_mhz = selected;
+              if (bandwidth == 40) {
+                ht_mode = suggest_ht40_mode(freq_mhz);
+                hdr->update_channel_width(bandwidth);
+              }
               std::string err;
               if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
                       card, freq_mhz, ht_mode, &err)) {
                 status_line = "Failed to set frequency: " + err;
               }
             }
+          }
+          if (!rx_running) {
+            txrx->start_receiving();
+            rx_running = true;
           }
           if (injecting) {
             stream_generator->start();
@@ -471,6 +505,10 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
         case 'h': {
           if (injecting) {
             stream_generator->stop();
+          }
+          if (rx_running) {
+            txrx->stop_receiving();
+            rx_running = false;
           }
           const auto input =
               ui_prompt_line(layout, "HT mode (HT20/HT40+/HT40-): ");
@@ -496,6 +534,10 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
                 }
               }
             }
+          }
+          if (!rx_running) {
+            txrx->start_receiving();
+            rx_running = true;
           }
           if (injecting) {
             stream_generator->start();
@@ -555,6 +597,29 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
 
     const auto now = std::chrono::steady_clock::now();
     if (now - last_freq_poll > std::chrono::seconds(1)) {
+      const auto override_paths =
+          wifibroadcast::wifi_card_helper::detect_openhd_override_paths();
+      if (override_paths.has_value()) {
+        const auto ch_opt =
+            wifibroadcast::wifi_card_helper::read_sysfs_int(
+                override_paths->channel);
+        const auto bw_opt =
+            wifibroadcast::wifi_card_helper::read_sysfs_int(
+                override_paths->channel_width);
+        if (ch_opt.has_value() && ch_opt.value() > 0) {
+          if (bw_opt.has_value()) {
+            override_info =
+                "ch " + std::to_string(ch_opt.value()) +
+                " w " + std::to_string(bw_opt.value());
+          } else {
+            override_info = "ch " + std::to_string(ch_opt.value());
+          }
+        } else {
+          override_info.clear();
+        }
+      } else {
+        override_info.clear();
+      }
       const auto freq_opt =
           wifibroadcast::wifi_card_helper::get_current_frequency_mhz(card);
       if (freq_opt.has_value()) {
@@ -569,10 +634,11 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
     }
 
     const auto txstats = txrx->get_tx_stats();
-    render_ui(layout, card, freq_mhz, current_freq_mhz, device_mode, ht_mode,
-              bandwidth, mcs, payload_size, target_rate_mbit, target_pps,
-              txstats, stream_generator->n_times_cannot_keep_up_wanted_pps,
-              injecting, status_line);
+    render_ui(layout, card, freq_mhz, current_freq_mhz, device_mode,
+              override_info, ht_mode, bandwidth, mcs, payload_size,
+              target_rate_mbit, target_pps, txstats,
+              stream_generator->n_times_cannot_keep_up_wanted_pps, injecting,
+              status_line);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
   }
 

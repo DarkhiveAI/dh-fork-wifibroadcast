@@ -146,6 +146,16 @@ inline std::optional<std::string> run_command_output(
 inline std::optional<int> get_current_frequency_mhz(
     const std::string &iface) {
 #if defined(__linux__)
+  const auto override_paths = detect_openhd_override_paths();
+  if (override_paths.has_value()) {
+    const auto channel_opt = read_sysfs_int(override_paths->channel);
+    if (channel_opt.has_value() && channel_opt.value() > 0) {
+      const int freq = channel_to_frequency_maybe(channel_opt.value());
+      if (freq > 0) {
+        return freq;
+      }
+    }
+  }
   const auto out_opt = run_command_output("iw dev " + iface + " info");
   if (!out_opt.has_value()) {
     return std::nullopt;
@@ -154,26 +164,19 @@ inline std::optional<int> get_current_frequency_mhz(
   std::istringstream iss(out);
   std::string line;
   while (std::getline(iss, line)) {
-    auto pos = line.find(" MHz");
-    if (pos == std::string::npos) {
+    if (line.find("channel ") == std::string::npos) {
       continue;
     }
-    auto start = line.rfind('(', pos);
-    if (start == std::string::npos) {
-      start = line.rfind(' ', pos);
-    }
-    if (start == std::string::npos) {
+    auto left = line.find('(');
+    auto right = line.find(" MHz");
+    if (left == std::string::npos || right == std::string::npos ||
+        right <= left + 1) {
       continue;
     }
-    start++;
-    if (start >= pos) {
-      continue;
+    const std::string number = trim_copy(line.substr(left + 1, right - left - 1));
+    if (is_number(number)) {
+      return std::stoi(number);
     }
-    const std::string number = trim_copy(line.substr(start, pos - start));
-    if (!is_number(number)) {
-      continue;
-    }
-    return std::stoi(number);
   }
   return std::nullopt;
 #else
@@ -367,6 +370,32 @@ inline int frequency_to_channel_maybe(uint32_t freq_mhz) {
     return static_cast<int>((freq_mhz - 5000) / 5);
   }
   return -1;
+}
+
+inline int channel_to_frequency_maybe(int channel) {
+  if (channel == 14) {
+    return 2484;
+  }
+  if (channel >= 1 && channel <= 13) {
+    return 2407 + (channel * 5);
+  }
+  if (channel > 0) {
+    return 5000 + (channel * 5);
+  }
+  return -1;
+}
+
+inline std::optional<int> read_sysfs_int(const char *path) {
+  if (path == nullptr) {
+    return std::nullopt;
+  }
+  std::ifstream ifs(path);
+  if (!ifs.is_open()) {
+    return std::nullopt;
+  }
+  int value = 0;
+  ifs >> value;
+  return ifs.fail() ? std::nullopt : std::optional<int>(value);
 }
 
 struct OpenhdOverridePaths {
