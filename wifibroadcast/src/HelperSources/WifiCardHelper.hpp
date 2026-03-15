@@ -119,12 +119,6 @@ inline std::string read_line(const std::string &prompt) {
   return trim_copy(line);
 }
 
-// Forward declarations for helpers used below.
-inline std::optional<int> read_sysfs_int(const char *path);
-inline int channel_to_frequency_maybe(int channel);
-struct OpenhdOverridePaths;
-inline std::optional<OpenhdOverridePaths> detect_openhd_override_paths();
-
 inline std::optional<std::string> run_command_output(
     const std::string &command) {
 #if defined(__linux__)
@@ -145,48 +139,6 @@ inline std::optional<std::string> run_command_output(
   return result;
 #else
   (void)command;
-  return std::nullopt;
-#endif
-}
-
-inline std::optional<int> get_current_frequency_mhz(
-    const std::string &iface) {
-#if defined(__linux__)
-  const auto override_paths = detect_openhd_override_paths();
-  if (override_paths.has_value()) {
-    const auto channel_opt = read_sysfs_int(override_paths->channel);
-    if (channel_opt.has_value() && channel_opt.value() > 0) {
-      const int freq = channel_to_frequency_maybe(channel_opt.value());
-      if (freq > 0) {
-        return freq;
-      }
-    }
-  }
-  const auto out_opt = run_command_output("iw dev " + iface + " info");
-  if (!out_opt.has_value()) {
-    return std::nullopt;
-  }
-  const auto &out = out_opt.value();
-  std::istringstream iss(out);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (line.find("channel ") == std::string::npos) {
-      continue;
-    }
-    auto left = line.find('(');
-    auto right = line.find(" MHz");
-    if (left == std::string::npos || right == std::string::npos ||
-        right <= left + 1) {
-      continue;
-    }
-    const std::string number = trim_copy(line.substr(left + 1, right - left - 1));
-    if (is_number(number)) {
-      return std::stoi(number);
-    }
-  }
-  return std::nullopt;
-#else
-  (void)iface;
   return std::nullopt;
 #endif
 }
@@ -439,6 +391,49 @@ inline std::optional<OpenhdOverridePaths> detect_openhd_override_paths() {
   }
 #endif
   return std::nullopt;
+}
+
+inline std::optional<int> get_current_frequency_mhz(
+    const std::string &iface) {
+#if defined(__linux__)
+  const auto override_paths = detect_openhd_override_paths();
+  if (override_paths.has_value()) {
+    const auto channel_opt = read_sysfs_int(override_paths->channel);
+    if (channel_opt.has_value() && channel_opt.value() > 0) {
+      const int freq = channel_to_frequency_maybe(channel_opt.value());
+      if (freq > 0) {
+        return freq;
+      }
+    }
+  }
+  const auto out_opt = run_command_output("iw dev " + iface + " info");
+  if (!out_opt.has_value()) {
+    return std::nullopt;
+  }
+  const auto &out = out_opt.value();
+  std::istringstream iss(out);
+  std::string line;
+  while (std::getline(iss, line)) {
+    if (line.find("channel ") == std::string::npos) {
+      continue;
+    }
+    auto left = line.find('(');
+    auto right = line.find(" MHz");
+    if (left == std::string::npos || right == std::string::npos ||
+        right <= left + 1) {
+      continue;
+    }
+    const std::string number =
+        trim_copy(line.substr(left + 1, right - left - 1));
+    if (is_number(number)) {
+      return std::stoi(number);
+    }
+  }
+  return std::nullopt;
+#else
+  (void)iface;
+  return std::nullopt;
+#endif
 }
 
 inline bool write_sysfs_value(const char *path, const std::string &value) {
