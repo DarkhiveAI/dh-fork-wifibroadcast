@@ -6,10 +6,14 @@
 #define WIFIBROADCAST_WIFI_CARD_HELPER_H
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <pcap/pcap.h>
 #include <sstream>
 #include <string>
@@ -115,6 +119,69 @@ inline std::string read_line(const std::string &prompt) {
   return trim_copy(line);
 }
 
+inline std::optional<std::string> run_command_output(
+    const std::string &command) {
+#if defined(__linux__)
+  std::array<char, 256> buffer{};
+  std::string result;
+  FILE *pipe = popen(command.c_str(), "r");
+  if (!pipe) {
+    return std::nullopt;
+  }
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
+         nullptr) {
+    result.append(buffer.data());
+  }
+  const int rc = pclose(pipe);
+  if (rc != 0 && result.empty()) {
+    return std::nullopt;
+  }
+  return result;
+#else
+  (void)command;
+  return std::nullopt;
+#endif
+}
+
+inline std::optional<int> get_current_frequency_mhz(
+    const std::string &iface) {
+#if defined(__linux__)
+  const auto out_opt = run_command_output("iw dev " + iface + " info");
+  if (!out_opt.has_value()) {
+    return std::nullopt;
+  }
+  const auto &out = out_opt.value();
+  std::istringstream iss(out);
+  std::string line;
+  while (std::getline(iss, line)) {
+    auto pos = line.find(" MHz");
+    if (pos == std::string::npos) {
+      continue;
+    }
+    auto start = line.rfind('(', pos);
+    if (start == std::string::npos) {
+      start = line.rfind(' ', pos);
+    }
+    if (start == std::string::npos) {
+      continue;
+    }
+    start++;
+    if (start >= pos) {
+      continue;
+    }
+    const std::string number = trim_copy(line.substr(start, pos - start));
+    if (!is_number(number)) {
+      continue;
+    }
+    return std::stoi(number);
+  }
+  return std::nullopt;
+#else
+  (void)iface;
+  return std::nullopt;
+#endif
+}
+
 inline std::string prompt_select_card(
     const std::vector<std::string> &detected_cards) {
   if (!detected_cards.empty()) {
@@ -210,12 +277,164 @@ inline int ht_mode_to_bandwidth(const std::string &normalized_ht_mode) {
   return 0;
 }
 
+inline int frequency_to_channel_maybe(uint32_t freq_mhz) {
+  if (freq_mhz == 2484) {
+    return 14;
+  }
+  if (freq_mhz >= 2412 && freq_mhz <= 2472 &&
+      ((freq_mhz - 2412) % 5 == 0)) {
+    return 1 + static_cast<int>((freq_mhz - 2412) / 5);
+  }
+  if (freq_mhz >= 5000 && ((freq_mhz - 5000) % 5 == 0)) {
+    return static_cast<int>((freq_mhz - 5000) / 5);
+  }
+  return -1;
+}
+
+struct OpenhdOverridePaths {
+  const char *channel = nullptr;
+  const char *channel_width = nullptr;
+  const char *tx_power = nullptr;
+  const char *force_bw80_for_bw40 = nullptr;
+};
+
+inline std::optional<OpenhdOverridePaths> detect_openhd_override_paths() {
+#if defined(__linux__)
+  const OpenhdOverridePaths candidates[] = {
+      {"/sys/module/88XXau_ohd/parameters/openhd_override_channel",
+       "/sys/module/88XXau_ohd/parameters/openhd_override_channel_width",
+       "/sys/module/88XXau_ohd/parameters/openhd_override_tx_power_index",
+       nullptr},
+      {"/sys/module/88x2bu_ohd/parameters/openhd_override_channel",
+       "/sys/module/88x2bu_ohd/parameters/openhd_override_channel_width",
+       "/sys/module/88x2bu_ohd/parameters/openhd_override_tx_power_mbm",
+       nullptr},
+      {"/sys/module/88x2cu_ohd/parameters/openhd_override_channel",
+       "/sys/module/88x2cu_ohd/parameters/openhd_override_channel_width",
+       "/sys/module/88x2cu_ohd/parameters/openhd_override_tx_power_mbm",
+       nullptr},
+      {"/sys/module/88x2eu_ohd/parameters/openhd_override_channel",
+       "/sys/module/88x2eu_ohd/parameters/openhd_override_channel_width",
+       "/sys/module/88x2eu_ohd/parameters/openhd_override_tx_power_mbm",
+       "/sys/module/88x2eu_ohd/parameters/rtw_force_tx_rf_bw_80_for_bw40"},
+  };
+  for (const auto &entry : candidates) {
+    std::error_code ec;
+    if (entry.channel && std::filesystem::exists(entry.channel, ec)) {
+      return entry;
+    }
+  }
+#endif
+  return std::nullopt;
+}
+
+inline bool write_sysfs_value(const char *path, const std::string &value) {
+  if (path == nullptr) {
+    return false;
+  }
+  std::ofstream ofs(path);
+  if (!ofs.is_open()) {
+    return false;
+  }
+  ofs << value;
+  return true;
+}
+
+inline std::string default_ht_mode_for_bw(int channel_width_mhz) {
+  if (channel_width_mhz == 40) {
+    return "HT40+";
+  }
+  return "HT20";
+}
+
+inline bool apply_openhd_override_frequency(const std::string &iface,
+                                            uint32_t freq_mhz,
+                                            int channel_width_mhz,
+                                            std::string ht_mode,
+                                            std::string *error_out) {
+#if defined(__linux__)
+  const auto paths_opt = detect_openhd_override_paths();
+  if (!paths_opt.has_value()) {
+    return false;
+  }
+  const auto paths = paths_opt.value();
+  const int channel = frequency_to_channel_maybe(freq_mhz);
+  if (channel <= 0) {
+    if (error_out) {
+      *error_out = "Unsupported frequency for override.";
+    }
+    return false;
+  }
+  if (ht_mode.empty()) {
+    ht_mode = default_ht_mode_for_bw(channel_width_mhz);
+  }
+  const int width_override =
+      (channel_width_mhz == 40) ? 1
+      : (channel_width_mhz == 10) ? 6
+      : (channel_width_mhz == 5)  ? 5
+      : (channel_width_mhz == 80) ? 2
+                                  : 0;
+
+  if (!write_sysfs_value(paths.channel, std::to_string(channel))) {
+    if (error_out) {
+      *error_out = "Failed to write override channel.";
+    }
+    return false;
+  }
+  if (paths.channel_width != nullptr) {
+    write_sysfs_value(paths.channel_width, std::to_string(width_override));
+  }
+  if (paths.force_bw80_for_bw40 != nullptr) {
+    const int force_val = (channel_width_mhz == 40) ? 1 : 0;
+    write_sysfs_value(paths.force_bw80_for_bw40, std::to_string(force_val));
+  }
+
+  const bool is_2g = freq_mhz < 3000;
+  uint32_t dummy_freq = is_2g ? 2412 : 5180;
+  if (channel_width_mhz == 40) {
+    if (ht_mode == "HT40-") {
+      dummy_freq = is_2g ? 2432 : 5200;
+    } else {
+      dummy_freq = is_2g ? 2412 : 5180;
+    }
+  }
+  std::stringstream cmd;
+  cmd << "iw dev " << iface << " set freq " << dummy_freq << " " << ht_mode;
+  const int ret = std::system(cmd.str().c_str());
+  if (ret != 0) {
+    if (error_out) {
+      *error_out = "iw command failed after override.";
+    }
+    return false;
+  }
+  return true;
+#else
+  (void)iface;
+  (void)freq_mhz;
+  (void)channel_width_mhz;
+  (void)ht_mode;
+  if (error_out) {
+    *error_out = "OpenHD override not supported on this platform.";
+  }
+  return false;
+#endif
+}
+
 inline bool apply_iw_freq_and_ht(const std::string &iface, int freq_mhz,
                                  const std::string &normalized_ht_mode,
                                  std::string *error_out) {
   if (freq_mhz <= 0) {
     return true;
   }
+#if defined(__linux__)
+  const int bw =
+      ht_mode_to_bandwidth(normalized_ht_mode.empty() ? "HT20"
+                                                      : normalized_ht_mode);
+  if (apply_openhd_override_frequency(iface, static_cast<uint32_t>(freq_mhz),
+                                      bw, normalized_ht_mode, error_out)) {
+    return true;
+  }
+#endif
   std::stringstream cmd;
   cmd << "iw dev " << iface << " set freq " << freq_mhz;
   if (!normalized_ht_mode.empty()) {

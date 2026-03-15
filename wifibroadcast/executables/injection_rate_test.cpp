@@ -63,54 +63,179 @@ static int calculate_target_pps(double rate_mbit, int payload_size) {
   return std::max(1, pps);
 }
 
-static std::string ui_prompt_line(const std::string &prompt) {
+struct UiLayout {
+  WINDOW *header = nullptr;
+  WINDOW *settings = nullptr;
+  WINDOW *stats = nullptr;
+  WINDOW *help = nullptr;
+  WINDOW *footer = nullptr;
   int rows = 0;
   int cols = 0;
-  getmaxyx(stdscr, rows, cols);
-  move(rows - 1, 0);
-  clrtoeol();
-  mvprintw(rows - 1, 0, "%s", prompt.c_str());
+};
+
+static void destroy_layout(UiLayout &layout) {
+  if (layout.header) delwin(layout.header);
+  if (layout.settings) delwin(layout.settings);
+  if (layout.stats) delwin(layout.stats);
+  if (layout.help) delwin(layout.help);
+  if (layout.footer) delwin(layout.footer);
+  layout = UiLayout{};
+}
+
+static UiLayout create_layout() {
+  UiLayout layout{};
+  getmaxyx(stdscr, layout.rows, layout.cols);
+  const int header_h = 3;
+  const int footer_h = 2;
+  const int help_h = 7;
+  const int body_h = std::max(4, layout.rows - header_h - footer_h - help_h);
+  const int half_w = std::max(20, layout.cols / 2);
+  layout.header = newwin(header_h, layout.cols, 0, 0);
+  layout.settings = newwin(body_h, half_w, header_h, 0);
+  layout.stats = newwin(body_h, layout.cols - half_w, header_h, half_w);
+  layout.help = newwin(help_h, layout.cols, header_h + body_h, 0);
+  layout.footer = newwin(footer_h, layout.cols,
+                         header_h + body_h + help_h, 0);
+  return layout;
+}
+
+static void init_colors() {
+  if (!has_colors()) {
+    return;
+  }
+  start_color();
+  use_default_colors();
+  init_pair(1, COLOR_CYAN, -1);
+  init_pair(2, COLOR_GREEN, -1);
+  init_pair(3, COLOR_YELLOW, -1);
+  init_pair(4, COLOR_RED, -1);
+  init_pair(5, COLOR_MAGENTA, -1);
+}
+
+static void draw_bar(WINDOW *win, int y, int x, int width, double value,
+                     double max_value, int color_pair) {
+  if (width <= 0) {
+    return;
+  }
+  const double ratio =
+      (max_value <= 0.0) ? 0.0 : std::min(1.0, value / max_value);
+  const int filled = static_cast<int>(ratio * width);
+  wattron(win, COLOR_PAIR(color_pair));
+  for (int i = 0; i < width; i++) {
+    mvwaddch(win, y, x + i, (i < filled) ? '#' : '-');
+  }
+  wattroff(win, COLOR_PAIR(color_pair));
+}
+
+static std::string ui_prompt_line(UiLayout &layout, const std::string &prompt) {
+  nodelay(stdscr, false);
+  werase(layout.footer);
+  box(layout.footer, 0, 0);
+  mvwprintw(layout.footer, 0, 2, "Input");
+  mvwprintw(layout.footer, 1, 2, "%s", prompt.c_str());
+  wrefresh(layout.footer);
   echo();
   curs_set(1);
   char buf[128] = {};
-  getnstr(buf, sizeof(buf) - 1);
+  wgetnstr(layout.footer, buf, sizeof(buf) - 1);
   noecho();
   curs_set(0);
+  nodelay(stdscr, true);
   return wifibroadcast::wifi_card_helper::trim_copy(buf);
 }
 
-static void render_ui(const std::string &card, int freq_mhz,
+static void render_ui(const UiLayout &layout, const std::string &card,
+                      int target_freq_mhz, int current_freq_mhz,
                       const std::string &ht_mode, int bandwidth, int mcs,
                       int payload_size, double target_rate_mbit, int target_pps,
                       const WBTxRx::TxStats &txstats, int cannot_keep_up,
                       bool injecting, const std::string &status_line) {
-  erase();
-  mvprintw(0, 0, "WiFi Injection UI (q to quit)");
-  mvprintw(2, 0, "Card: %s", card.c_str());
-  mvprintw(3, 0, "Freq: %d MHz   HT: %s   BW: %d MHz", freq_mhz,
-           ht_mode.empty() ? "-" : ht_mode.c_str(), bandwidth);
-  mvprintw(4, 0, "MCS: %d   Payload: %d bytes", mcs, payload_size);
-  mvprintw(5, 0, "Target rate: %.2f Mbit/s   Target PPS: %d", target_rate_mbit,
-           target_pps);
-  mvprintw(7, 0, "TX PPS: %d   TX bitrate: %s", txstats.curr_packets_per_second,
-           StringHelper::bitrate_readable(
-               txstats.curr_bits_per_second_excluding_overhead)
-               .c_str());
-  mvprintw(8, 0, "TX errors: %d   Cannot keep up: %d",
-           txstats.count_tx_injections_error_hint, cannot_keep_up);
-  mvprintw(9, 0, "Injecting: %s", injecting ? "YES" : "NO");
-  mvprintw(11, 0, "Keys:");
-  mvprintw(12, 2, "m/M: MCS -/+");
-  mvprintw(13, 2, "b: toggle BW 20/40");
-  mvprintw(14, 2, "f: set frequency");
-  mvprintw(15, 2, "h: set HT mode (HT20/HT40+/HT40-)");
-  mvprintw(16, 2, "r: set target rate (Mbit/s)");
-  mvprintw(17, 2, "p: set payload size (bytes)");
-  mvprintw(18, 2, "s: start/stop injection");
-  if (!status_line.empty()) {
-    mvprintw(20, 0, "%s", status_line.c_str());
+  if (layout.rows < 20 || layout.cols < 60) {
+    erase();
+    mvprintw(0, 0, "Terminal too small for UI.");
+    refresh();
+    return;
   }
-  refresh();
+
+  werase(layout.header);
+  werase(layout.settings);
+  werase(layout.stats);
+  werase(layout.help);
+  werase(layout.footer);
+
+  box(layout.header, 0, 0);
+  wattron(layout.header, COLOR_PAIR(1));
+  mvwprintw(layout.header, 1, 2,
+            "WiFi Injection Monitor  (q to quit)");
+  wattroff(layout.header, COLOR_PAIR(1));
+
+  box(layout.settings, 0, 0);
+  mvwprintw(layout.settings, 0, 2, "Settings");
+  mvwprintw(layout.settings, 1, 2, "Card: %s", card.c_str());
+  if (current_freq_mhz > 0) {
+    if (target_freq_mhz > 0) {
+      mvwprintw(layout.settings, 2, 2, "Freq: %d MHz (target %d)",
+                current_freq_mhz, target_freq_mhz);
+    } else {
+      mvwprintw(layout.settings, 2, 2, "Freq: %d MHz", current_freq_mhz);
+    }
+  } else if (target_freq_mhz > 0) {
+    mvwprintw(layout.settings, 2, 2, "Freq: %d MHz", target_freq_mhz);
+  } else {
+    mvwprintw(layout.settings, 2, 2, "Freq: -");
+  }
+  mvwprintw(layout.settings, 3, 2, "HT: %s", ht_mode.empty() ? "-" : ht_mode.c_str());
+  mvwprintw(layout.settings, 4, 2, "BW: %d MHz", bandwidth);
+  mvwprintw(layout.settings, 5, 2, "MCS: %d", mcs);
+  mvwprintw(layout.settings, 6, 2, "Payload: %d bytes", payload_size);
+  mvwprintw(layout.settings, 7, 2, "Target: %.2f Mbit/s", target_rate_mbit);
+  mvwprintw(layout.settings, 8, 2, "Target PPS: %d", target_pps);
+
+  box(layout.stats, 0, 0);
+  mvwprintw(layout.stats, 0, 2, "Live Stats");
+  mvwprintw(layout.stats, 1, 2, "Injecting: %s", injecting ? "YES" : "NO");
+  mvwprintw(layout.stats, 2, 2, "TX PPS: %d",
+            txstats.curr_packets_per_second);
+  mvwprintw(layout.stats, 3, 2, "TX bitrate: %s",
+            StringHelper::bitrate_readable(
+                txstats.curr_bits_per_second_excluding_overhead)
+                .c_str());
+  mvwprintw(layout.stats, 4, 2, "TX errors: %d",
+            txstats.count_tx_injections_error_hint);
+  mvwprintw(layout.stats, 5, 2, "Cannot keep up: %d", cannot_keep_up);
+
+  const double target_bps = target_rate_mbit * 1000.0 * 1000.0;
+  const double curr_bps =
+      static_cast<double>(txstats.curr_bits_per_second_excluding_overhead);
+  const int bar_width = std::max(10, layout.cols / 3);
+  mvwprintw(layout.stats, 7, 2, "Rate:");
+  draw_bar(layout.stats, 7, 8, bar_width, curr_bps, target_bps, 2);
+  mvwprintw(layout.stats, 8, 2, "PPS:");
+  draw_bar(layout.stats, 8, 8, bar_width,
+           static_cast<double>(txstats.curr_packets_per_second),
+           static_cast<double>(target_pps), 5);
+
+  box(layout.help, 0, 0);
+  mvwprintw(layout.help, 0, 2, "Controls");
+  mvwprintw(layout.help, 1, 2, "m/M: MCS -/+   b: toggle BW 20/40");
+  mvwprintw(layout.help, 2, 2, "f: set frequency   h: set HT mode");
+  mvwprintw(layout.help, 3, 2, "r: set target rate (Mbit/s)");
+  mvwprintw(layout.help, 4, 2, "p: set payload size (bytes)");
+  mvwprintw(layout.help, 5, 2, "s: start/stop injection");
+
+  box(layout.footer, 0, 0);
+  mvwprintw(layout.footer, 0, 2, "Status");
+  if (!status_line.empty()) {
+    mvwprintw(layout.footer, 1, 2, "%s", status_line.c_str());
+  } else {
+    mvwprintw(layout.footer, 1, 2, "OK");
+  }
+
+  wrefresh(layout.header);
+  wrefresh(layout.settings);
+  wrefresh(layout.stats);
+  wrefresh(layout.help);
+  wrefresh(layout.footer);
 }
 
 static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
@@ -153,9 +278,21 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
   keypad(stdscr, true);
   nodelay(stdscr, true);
   curs_set(0);
+  init_colors();
+
+  UiLayout layout = create_layout();
 
   bool running = true;
+  int current_freq_mhz = -1;
+  auto last_freq_poll = std::chrono::steady_clock::now();
   while (running) {
+    int rows = 0;
+    int cols = 0;
+    getmaxyx(stdscr, rows, cols);
+    if (rows != layout.rows || cols != layout.cols) {
+      destroy_layout(layout);
+      layout = create_layout();
+    }
     int ch = getch();
     if (ch != ERR) {
       status_line.clear();
@@ -185,7 +322,8 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           }
           break;
         case 'f': {
-          const auto input = ui_prompt_line("Frequency MHz (0 to skip): ");
+          const auto input = ui_prompt_line(layout,
+                                            "Frequency MHz (0 to skip): ");
           if (!input.empty()) {
             const int new_freq = atoi(input.c_str());
             freq_mhz = new_freq;
@@ -200,7 +338,8 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           break;
         }
         case 'h': {
-          const auto input = ui_prompt_line("HT mode (HT20/HT40+/HT40-): ");
+          const auto input =
+              ui_prompt_line(layout, "HT mode (HT20/HT40+/HT40-): ");
           if (!input.empty()) {
             const auto normalized =
                 wifibroadcast::wifi_card_helper::normalize_ht_mode(input);
@@ -227,7 +366,7 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           break;
         }
         case 'r': {
-          const auto input = ui_prompt_line("Target rate Mbit/s: ");
+          const auto input = ui_prompt_line(layout, "Target rate Mbit/s: ");
           if (!input.empty()) {
             const double new_rate = strtod(input.c_str(), nullptr);
             if (new_rate > 0.0) {
@@ -242,7 +381,7 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
           break;
         }
         case 'p': {
-          const auto input = ui_prompt_line("Payload size bytes: ");
+          const auto input = ui_prompt_line(layout, "Payload size bytes: ");
           if (!input.empty()) {
             const int new_size = clamp_payload_size(atoi(input.c_str()));
             if (new_size > 0) {
@@ -270,15 +409,26 @@ static int run_ncurses_ui(const std::string &card, int initial_freq_mhz,
       }
     }
 
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_freq_poll > std::chrono::seconds(1)) {
+      const auto freq_opt =
+          wifibroadcast::wifi_card_helper::get_current_frequency_mhz(card);
+      if (freq_opt.has_value()) {
+        current_freq_mhz = freq_opt.value();
+      }
+      last_freq_poll = now;
+    }
+
     const auto txstats = txrx->get_tx_stats();
-    render_ui(card, freq_mhz, ht_mode, bandwidth, mcs, payload_size,
-              target_rate_mbit, target_pps, txstats,
+    render_ui(layout, card, freq_mhz, current_freq_mhz, ht_mode, bandwidth,
+              mcs, payload_size, target_rate_mbit, target_pps, txstats,
               stream_generator->n_times_cannot_keep_up_wanted_pps, injecting,
               status_line);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
   }
 
   stream_generator->stop();
+  destroy_layout(layout);
   endwin();
   return 0;
 }
