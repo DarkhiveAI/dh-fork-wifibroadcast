@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "../src/WBTxRx.h"
+#include "../src/encryption/Encryption.h"
 #include "Helper.hpp"
 
 static std::vector<std::shared_ptr<std::vector<uint8_t>>>
@@ -39,11 +40,13 @@ static void test_dummy_socket_impl() {
   std::cout << "Done test_dummy_socket_impl" << std::endl;
 }
 
-static std::shared_ptr<WBTxRx> make_txrx(bool air) {
+static std::shared_ptr<WBTxRx> make_txrx(bool air,
+                                         const wb::KeyPairTxRx& keypair) {
   auto card = wifibroadcast::create_card_emulate(air);
   std::vector<wifibroadcast::WifiCard> cards;
   cards.push_back(card);
   WBTxRx::Options options_txrx{};
+  options_txrx.secure_keypair = keypair;
   options_txrx.log_all_received_validated_packets = true;
   options_txrx.rx_radiotap_debug_level = 3;
   options_txrx.advanced_debugging_rx = true;
@@ -57,8 +60,9 @@ static std::shared_ptr<WBTxRx> make_txrx(bool air) {
 }
 
 static void test_wb_tx_rx_dummy() {
-  auto tx_rx_air = make_txrx(true);
-  auto tx_rx_gnd = make_txrx(false);
+  const auto shared_keypair = wb::generate_keypair_random();
+  auto tx_rx_air = make_txrx(true, shared_keypair);
+  auto tx_rx_gnd = make_txrx(false, shared_keypair);
   tx_rx_air->start_receiving();
   tx_rx_gnd->start_receiving();
 
