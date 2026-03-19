@@ -24,7 +24,7 @@ WBTxRx::WBTxRx(
       "[{}]", options_to_string(
                   wifibroadcast::get_wifi_card_names(m_wifi_cards), m_options));
   // Common error - not run as root
-  if (!SchedulingHelper::check_root()) {
+  if (m_options.require_root && !SchedulingHelper::check_root()) {
     std::cerr << "wifibroadcast needs root" << std::endl;
     m_console->warn("wifibroadcast needs root");
     assert(false);

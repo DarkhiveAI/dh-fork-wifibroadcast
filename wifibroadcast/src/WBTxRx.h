@@ -111,6 +111,8 @@ class WBTxRx {
         std::chrono::milliseconds(5);
     // debugging of rx radiotap header(s)
     int rx_radiotap_debug_level = 0;
+    // require running as root (set false for dummy link tests)
+    bool require_root = true;
   };
   /**
    * @param wifi_cards card(s) used for tx / rx

@@ -52,6 +52,7 @@ static std::shared_ptr<WBTxRx> make_txrx(bool air,
   options_txrx.advanced_debugging_rx = true;
   options_txrx.use_gnd_identifier = !air;
   options_txrx.log_all_received_packets = true;
+  options_txrx.require_root = false;
   auto radiotap_header_holder_tx = std::make_shared<RadiotapHeaderTxHolder>();
   std::shared_ptr<WBTxRx> txrx =
       std::make_shared<WBTxRx>(cards, options_txrx, radiotap_header_holder_tx);
