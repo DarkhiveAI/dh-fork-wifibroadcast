@@ -128,7 +128,7 @@ else ()
             target_link_libraries(wifibroadcast PRIVATE spdlog::spdlog)
         else()
             set(WB_OPENHD_SPDLOG_INCLUDE_HINT
-                ${CMAKE_CURRENT_LIST_DIR}/../../../ohd_common/lib/spdlog/include)
+                ${CMAKE_CURRENT_LIST_DIR}/../../../../ohd_common/lib/spdlog/include)
             if(EXISTS "${WB_OPENHD_SPDLOG_INCLUDE_HINT}/spdlog/spdlog.h")
                 set(SPDLOG_INCLUDE_DIR "${WB_OPENHD_SPDLOG_INCLUDE_HINT}")
             else()
