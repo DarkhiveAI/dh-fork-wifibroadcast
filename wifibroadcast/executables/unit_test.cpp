@@ -416,6 +416,11 @@ static void test_manual_retransmission() {
 static void test_auto_retransmission() {
   std::cout << "Testing Auto Retransmission" << std::endl;
 
+  // Use a shared keypair so the emulated air/gnd units can validate packets
+  // (even when encryption is disabled, validation still requires the session
+  // key to decrypt correctly).
+  const auto shared_keypair = wb::generate_keypair_random();
+
   // Setup Tx side (Air)
   auto card_air = wifibroadcast::create_card_emulate(true);
   std::vector<wifibroadcast::WifiCard> cards_air;
@@ -424,6 +429,7 @@ static void test_auto_retransmission() {
   WBTxRx::Options options_txrx_air{};
   options_txrx_air.tx_without_pcap = true;
   options_txrx_air.use_gnd_identifier = false;  // Air unit
+  options_txrx_air.secure_keypair = shared_keypair;
   auto radiotap_header_holder = std::make_shared<RadiotapHeaderTxHolder>();
   std::shared_ptr<WBTxRx> txrx_air = std::make_shared<WBTxRx>(
       cards_air, options_txrx_air, radiotap_header_holder);
@@ -437,6 +443,7 @@ static void test_auto_retransmission() {
   WBTxRx::Options options_txrx_gnd{};
   options_txrx_gnd.tx_without_pcap = true;
   options_txrx_gnd.use_gnd_identifier = true;  // Ground unit
+  options_txrx_gnd.secure_keypair = shared_keypair;
   std::shared_ptr<WBTxRx> txrx_gnd = std::make_shared<WBTxRx>(
       cards_gnd, options_txrx_gnd, radiotap_header_holder);
   txrx_gnd->start_receiving();  // Listen for video/telemetry
