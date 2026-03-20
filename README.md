@@ -2,12 +2,16 @@
 C++ Library for Wi-Fi broadcast video and telemetry streaming.
 
 ## Features
-1) Multiplexing and packet validation/encryption
+1) Multiplexing and packet validation
 2) Zero latency overhead FEC video streaming (requires usage of C++)
 3) SIMD accelerated FEC (NEON on ARM, SSSE3 on x86)
 4) Advanced debugging and statistics (e.g. packet loss) [see](https://github.com/OpenHD/wifibroadcast/blob/master/src/WBTxRx.h#L121)
 5) Simple examples to get started
 6) Basic unit tests for FEC
+
+Note (OpenHD): Community builds do not expose user-controlled keyfiles or
+premium video encryption. Licensed builds provide premium video encryption.
+For licensing, contact license@openhdfpv.com.
 
 # Getting started
 ## Compiling

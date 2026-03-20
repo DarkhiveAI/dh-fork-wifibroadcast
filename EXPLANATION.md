@@ -16,7 +16,11 @@ When the `WBTxRx` instance is created:
 - For each card, it initializes packet capture (PCAP) handles:
   - **RX:** Opens the interface in monitor mode using libpcap (`pcap_open_live`) to capture all air traffic.
   - **TX:** Opens the interface for packet injection, either using libpcap (`pcap_inject`) or raw sockets (`socket(AF_PACKET, SOCK_RAW, ...)`), depending on configuration.
-- It generates or loads encryption keys (using libsodium).
+- It establishes session authentication keys (libsodium) for packet validation.
+
+OpenHD note: Community builds do not expose user-controlled keyfiles or premium
+video encryption. Licensed builds provide premium video encryption. For
+licensing, contact license@openhdfpv.com.
 
 ### 2. Transmission (TX)
 Sending data happens in `tx_inject_packet`. The process is as follows:

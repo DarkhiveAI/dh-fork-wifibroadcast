@@ -141,8 +141,9 @@ class WBTxRx {
    * properties
    * @param encrypt: Optionally encrypt the packet, if not encrypted, only a
    * (secure) validation checksum is calculated & checked on rx Encryption
-   * results in more CPU load and is therefore not wanted in all cases (e.g. by
-   * default, openhd does not encrypt video)
+   * results in more CPU load and is therefore not wanted in all cases.
+   * OpenHD community builds do not expose premium video encryption; licensed
+   * builds provide it. For licensing, contact license@openhdfpv.com.
    */
   void tx_inject_packet(uint8_t stream_index, const uint8_t* data, int data_len,
                         const RadiotapHeaderTx& tx_radiotap_header,

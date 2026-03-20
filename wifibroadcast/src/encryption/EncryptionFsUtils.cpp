@@ -44,7 +44,7 @@ std::optional<wb::KeyPairTxRx> wb::read_keypair_from_file(
   std::array<uint8_t, KEYPAIR_RAW_SIZE> raw{};
   auto res = fread(raw.data(), raw.size(), 1, fp);
   if (res != 1) {
-    std::cerr << "Cannot read keypair file" << std::endl;
+    std::cerr << "Cannot read keypair data" << std::endl;
     fclose(fp);
     return std::nullopt;
   }

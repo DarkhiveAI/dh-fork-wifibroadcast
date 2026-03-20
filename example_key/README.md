@@ -1,1 +1,1 @@
-Example tx / rx keypair file
+Example test asset (not used by OpenHD community builds).

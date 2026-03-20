@@ -25,7 +25,6 @@
 #include <thread>
 #include <vector>
 
-#include "../src//encryption/EncryptionFsUtils.h"
 #include "../src/HelperSources/Helper.hpp"
 #include "../src/Ieee80211Header.hpp"
 #include "../src/WBPacketHeader.h"
@@ -208,21 +207,12 @@ static void test_fec_stream_random_bs_fs_overhead_dropped() {
 }  // namespace TestFEC
 
 // Test encryption+packet validation and packet validation only
-static void test_encrypt_decrypt_validate(const bool use_key_from_file,
-                                          bool message_signing_only) {
+static void test_encrypt_decrypt_validate(bool message_signing_only) {
   const std::string TEST_TYPE = message_signing_only ? "Sign" : "Encrypt&Sign";
-  const std::string TEST_KEY_TYPE =
-      use_key_from_file ? "key from file" : "random key";
+  const std::string TEST_KEY_TYPE = "random key";
   fmt::print("Testing {} with {}\n", TEST_TYPE, TEST_KEY_TYPE);
-  const std::string KEY_FILENAME = "../example_key/txrx.key";
   wb::KeyPairTxRx keyPairTxRx{};
-  if (use_key_from_file) {
-    auto tmp = wb::read_keypair_from_file(KEY_FILENAME);
-    assert(tmp.has_value());
-    keyPairTxRx = tmp.value();
-  } else {
-    keyPairTxRx = wb::generate_keypair_random();
-  }
+  keyPairTxRx = wb::generate_keypair_random();
 
   wb::Encryptor encryptor{
       keyPairTxRx.get_tx_key(true)};  // We send from air unit
@@ -657,9 +647,8 @@ int main(int argc, char *argv[]) {
     if (test_mode == 0 || test_mode == 2) {
       std::cout << "Testing Encryption" << std::endl;
       test_encryption_serialize();
-      test_encrypt_decrypt_validate(false, false);
-      test_encrypt_decrypt_validate(false, true);
-      test_encrypt_decrypt_validate(true, false);
+      test_encrypt_decrypt_validate(false);
+      test_encrypt_decrypt_validate(true);
     }
     if (test_mode == 0) {
       test_manual_retransmission();

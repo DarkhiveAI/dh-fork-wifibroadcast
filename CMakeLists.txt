@@ -9,9 +9,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(WB_USE_SPDLOG_EXTERNALLY OFF)
 include(wifibroadcast/WBLib.cmake)
 
-add_executable(wfb_keygen wifibroadcast/executables/wfb_keygen.cpp)
-target_link_libraries(wfb_keygen PRIVATE ${WB_TARGET_LINK_LIBRARIES})
-
 add_executable(benchmark wifibroadcast/executables/benchmark.cpp)
 target_link_libraries(benchmark PRIVATE ${WB_TARGET_LINK_LIBRARIES})
 
@@ -56,7 +53,6 @@ target_link_libraries(test_queue PRIVATE ${WB_TARGET_LINK_LIBRARIES})
 # When it is a static library, we don't need to install it.
 # But if it is a shared library, we need to install it.
 #install(TARGETS wifibroadcast DESTINATION lib)
-install(TARGETS wfb_keygen DESTINATION bin)
 install(TARGETS benchmark DESTINATION bin)
 install(TARGETS udp_generator_validator DESTINATION bin)
 install(TARGETS unit_test DESTINATION bin)

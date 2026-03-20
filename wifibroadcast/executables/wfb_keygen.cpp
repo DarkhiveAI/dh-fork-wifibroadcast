@@ -20,24 +20,26 @@
 #include <iostream>
 
 #include "../src/encryption/Encryption.h"
-#include "../src/encryption/EncryptionFsUtils.h"
 
 /**
- * Generates a new tx rx keypair and saves it to file for later use.
+ * Generates a new tx/rx keypair and prints it as raw bytes (hex).
+ * (Key files are not used by OpenHD community builds.)
  */
 int main(int argc, char *const *argv) {
   if (argc > 1) {
     std::cerr << "Usage: wfb-keygen (no arguments)" << std::endl;
     return 1;
   }
-  std::cout << "Generating random txrx keypair" << std::endl;
+  std::cout << "Generating random txrx keypair (hex)" << std::endl;
   wb::KeyPairTxRx keyPairTxRx = wb::generate_keypair_random();
-  auto res = wb::write_keypair_to_file(keyPairTxRx, "txrx.key");
-  if (res) {
-    std::cout << "Wrote keypair to file" << std::endl;
-    return 0;
-  } else {
-    std::cout << "Cannot write keypair to file" << std::endl;
-    return -1;
+  const auto raw = wb::KeyPairTxRx::as_raw(keyPairTxRx);
+  std::ios_base::fmtflags f(std::cout.flags());
+  for (size_t i = 0; i < raw.size(); ++i) {
+    std::cout << std::hex << std::uppercase
+              << static_cast<int>(raw[i] >> 4)
+              << static_cast<int>(raw[i] & 0xF);
   }
+  std::cout.flags(f);
+  std::cout << std::endl;
+  return 0;
 }
