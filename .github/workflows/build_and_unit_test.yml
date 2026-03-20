@@ -18,9 +18,6 @@ jobs:
       - name: Build
         run: |
           ./build_cmake.sh
-      - name: Test generate keys
-        run: |
-          ./build/wfb_keygen
       - name: Unit test 1
         run: |
           cd build

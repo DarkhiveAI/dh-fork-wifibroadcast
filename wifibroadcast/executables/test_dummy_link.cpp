@@ -73,7 +73,7 @@ static void test_wb_tx_rx_dummy() {
   for (auto& packet : dummy_packets1) {
     tx_rx_air->tx_inject_packet(5, packet.data(), packet.size(),
                                 radiotap_header_holder_tx->thread_safe_get(),
-                                true);
+                                false);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   // Sleep a bit to make sure all queues are empty

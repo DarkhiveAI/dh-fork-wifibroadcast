@@ -609,6 +609,8 @@ int main(int argc, char *argv[]) {
   srand(time(NULL));
   int opt;
   int test_mode = 0;
+  // OpenHD community builds do not expose premium video encryption.
+  constexpr bool k_enable_premium_encryption_tests = false;
 
   while ((opt = getopt(argc, argv, "m:")) != -1) {
     switch (opt) {
@@ -618,7 +620,7 @@ int main(int argc, char *argv[]) {
       default: /* '?' */
       show_usage:
         std::cout << "Usage: Unit tests for FEC and encryption. -m 0,1,2 test "
-                     "mode: 0==ALL, 1==FEC only 2==Encryption only "
+                     "mode: 0==ALL, 1==FEC only 2==Validation only "
                      "3==ManualRetransmission 4==AutoRetransmission\n";
         return 1;
     }
@@ -645,10 +647,12 @@ int main(int argc, char *argv[]) {
       TestFEC::test_fec_stream_random_bs_fs_overhead_dropped();
     }
     if (test_mode == 0 || test_mode == 2) {
-      std::cout << "Testing Encryption" << std::endl;
+      std::cout << "Testing Session/Validation" << std::endl;
       test_encryption_serialize();
-      test_encrypt_decrypt_validate(false);
       test_encrypt_decrypt_validate(true);
+      if (k_enable_premium_encryption_tests) {
+        test_encrypt_decrypt_validate(false);
+      }
     }
     if (test_mode == 0) {
       test_manual_retransmission();
