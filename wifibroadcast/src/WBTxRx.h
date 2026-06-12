@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -19,6 +20,7 @@
 #include "../encryption/Decryptor.h"
 #include "../encryption/Encryption.h"
 #include "../encryption/Encryptor.h"
+#include "../encryption/ExternalCryptoPlugin.h"
 #include "../radiotap/RSSIAccumulator.hpp"
 #include "../radiotap/RadiotapHeaderTx.hpp"
 #include "../radiotap/RadiotapHeaderTxHolder.hpp"
@@ -113,6 +115,9 @@ class WBTxRx {
     int rx_radiotap_debug_level = 0;
     // require running as root (set false for dummy link tests)
     bool require_root = true;
+    // Optional closed-source crypto backend. Empty path means use
+    // OPENHD_VIDEO_CRYPTO_SO or the default OpenHD install path.
+    std::string external_crypto_plugin_path;
   };
   /**
    * @param wifi_cards card(s) used for tx / rx
@@ -147,7 +152,8 @@ class WBTxRx {
    */
   void tx_inject_packet(uint8_t stream_index, const uint8_t* data, int data_len,
                         const RadiotapHeaderTx& tx_radiotap_header,
-                        bool encrypt);
+                        bool encrypt, bool use_external_crypto = false);
+  bool load_external_encryption_plugin(const std::string& path = "");
   /**
    * A typical stream RX (aka the receiver for a specific multiplexed stream)
    * needs to react to events during streaming. For lowest latency, we do this
@@ -346,6 +352,9 @@ class WBTxRx {
   SessionKeyPacket m_tx_sess_key_packet;
   std::unique_ptr<wb::Encryptor> m_encryptor;
   std::unique_ptr<wb::Decryptor> m_decryptor;
+  std::unique_ptr<wb::ExternalCryptoPlugin> m_external_crypto;
+  bool m_logged_external_crypto_fallback = false;
+  bool m_logged_external_crypto_rx_missing = false;
   struct PcapTxRx {
     pcap_t* tx = nullptr;
     pcap_t* rx = nullptr;

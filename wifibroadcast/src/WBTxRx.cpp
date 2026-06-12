@@ -4,6 +4,7 @@
 
 #include "WBTxRx.h"
 
+#include <cstring>
 #include <utility>
 
 #include "../radiotap/RadiotapHeaderRx.hpp"
@@ -11,6 +12,32 @@
 #include "SchedulingHelper.hpp"
 #include "pcap_helper.hpp"
 #include "raw_socket_helper.hpp"
+
+namespace {
+
+struct ExternalCryptoPacketHeader {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t reserved[3];
+  uint64_t key_id;
+} __attribute__((packed));
+
+static_assert(sizeof(ExternalCryptoPacketHeader) == 16);
+
+constexpr uint32_t kExternalCryptoMagic = 0x58434257;  // "WBCX" little endian
+constexpr uint8_t kExternalCryptoVersion = 1;
+
+bool is_external_crypto_payload(const uint8_t* data, int data_len) {
+  if (!data || data_len < static_cast<int>(sizeof(ExternalCryptoPacketHeader))) {
+    return false;
+  }
+  ExternalCryptoPacketHeader header{};
+  std::memcpy(&header, data, sizeof(header));
+  return header.magic == kExternalCryptoMagic &&
+         header.version == kExternalCryptoVersion;
+}
+
+}  // namespace
 
 WBTxRx::WBTxRx(
     std::vector<wifibroadcast::WifiCard> wifi_cards1, Options options1,
@@ -28,6 +55,9 @@ WBTxRx::WBTxRx(
     std::cerr << "wifibroadcast needs root" << std::endl;
     m_console->warn("wifibroadcast needs root");
     assert(false);
+  }
+  if (!m_options.external_crypto_plugin_path.empty()) {
+    load_external_encryption_plugin(m_options.external_crypto_plugin_path);
   }
   m_receive_pollfds.resize(m_wifi_cards.size());
   m_active_tx_card_data.resize(m_wifi_cards.size());
@@ -129,7 +159,7 @@ WBTxRx::~WBTxRx() {
 void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
                               int data_len,
                               const RadiotapHeaderTx& tx_radiotap_header,
-                              bool encrypt) {
+                              bool encrypt, bool use_external_crypto) {
   assert(data_len <= MAX_PACKET_PAYLOAD_SIZE);
   assert(stream_index >= STREAM_INDEX_MIN && stream_index <= STREAM_INDEX_MAX);
   std::lock_guard<std::mutex> guard(m_tx_mutex);
@@ -138,16 +168,6 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
     return;
   }
   announce_session_key_if_needed();
-  // new wifi packet
-  const auto packet_size =
-      // Radiotap header comes first
-      RadiotapHeaderTx::SIZE_BYTES +
-      // Then the Ieee80211 header
-      Ieee80211HeaderRaw::SIZE_BYTES +
-      // actual data
-      data_len +
-      // encryption suffix
-      crypto_aead_chacha20poly1305_ABYTES;
   uint8_t* packet_buff = m_tx_packet_buff.data();
   // radiotap header comes first
   memcpy(packet_buff, tx_radiotap_header.getData(),
@@ -179,10 +199,48 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
   // suffix)
   uint8_t* encrypted_data_p = packet_buff + RadiotapHeaderTx::SIZE_BYTES +
                               Ieee80211HeaderRaw::SIZE_BYTES;
-  m_encryptor->set_encryption_enabled(encrypt);
+  int payload_len = 0;
   const auto before_encrypt = std::chrono::steady_clock::now();
-  const auto ciphertext_len = m_encryptor->authenticate_and_encrypt(
-      this_packet_nonce, data, data_len, encrypted_data_p);
+
+  bool used_external_crypto = false;
+  if (use_external_crypto && m_external_crypto &&
+      m_external_crypto->is_loaded()) {
+    ExternalCryptoPacketHeader header{};
+    header.magic = kExternalCryptoMagic;
+    header.version = kExternalCryptoVersion;
+    uint8_t* external_ciphertext =
+        encrypted_data_p + sizeof(ExternalCryptoPacketHeader);
+    size_t external_ciphertext_len =
+        RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE - sizeof(ExternalCryptoPacketHeader);
+    uint64_t key_id = 0;
+    if (m_external_crypto->encrypt(data, data_len, external_ciphertext,
+                                   &external_ciphertext_len, &key_id)) {
+      header.key_id = key_id;
+      std::memcpy(encrypted_data_p, &header, sizeof(header));
+      payload_len =
+          static_cast<int>(sizeof(header) + external_ciphertext_len);
+      used_external_crypto = true;
+      RadioPort external_radio_port{true, stream_index};
+      m_tx_ieee80211_hdr_openhd.write_radio_port_src_dst(
+          radio_port_to_uint8_t(external_radio_port));
+      std::memcpy(packet_buff + RadiotapHeaderTx::SIZE_BYTES,
+                  (uint8_t*)&m_tx_ieee80211_hdr_openhd,
+                  Ieee80211HeaderRaw::SIZE_BYTES);
+    }
+  }
+
+  if (!used_external_crypto) {
+    if (use_external_crypto && !m_logged_external_crypto_fallback) {
+      m_console->warn(
+          "External crypto requested but unavailable; falling back to current "
+          "wifibroadcast payload handling");
+      m_logged_external_crypto_fallback = true;
+    }
+    m_encryptor->set_encryption_enabled(encrypt);
+    payload_len = m_encryptor->authenticate_and_encrypt(
+        this_packet_nonce, data, data_len, encrypted_data_p);
+  }
+
   if (m_options.debug_encrypt_time) {
     m_packet_encrypt_time.add(std::chrono::steady_clock::now() -
                               before_encrypt);
@@ -193,11 +251,16 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
       m_packet_encrypt_time.reset();
     }
   }
-  // we allocate the right size in the beginning, but check if ciphertext_len is
-  // actually matching what we calculated (the documentation says 'write up to n
-  // bytes' but they probably mean (write exactly n bytes unless an error
-  // occurs)
-  assert(data_len + crypto_aead_chacha20poly1305_ABYTES == ciphertext_len);
+  if (!used_external_crypto) {
+    // we allocate the right size in the beginning, but check if ciphertext_len
+    // is actually matching what we calculated (the documentation says 'write up
+    // to n bytes' but they probably mean (write exactly n bytes unless an error
+    // occurs)
+    assert(data_len + crypto_aead_chacha20poly1305_ABYTES == payload_len);
+  }
+  assert(payload_len <= RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE);
+  const auto packet_size = RadiotapHeaderTx::SIZE_BYTES +
+                           Ieee80211HeaderRaw::SIZE_BYTES + payload_len;
   // we inject the packet on whatever card has the highest rx rssi right now
   bool success;
   if (m_enable_redundant_tx) {
@@ -223,6 +286,14 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
     // threads calling inject
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+}
+
+bool WBTxRx::load_external_encryption_plugin(const std::string& path) {
+  if (!m_external_crypto) {
+    m_external_crypto = std::make_unique<wb::ExternalCryptoPlugin>();
+  }
+  const bool is_air = !m_options.use_gnd_identifier;
+  return m_external_crypto->load(path, is_air);
 }
 
 bool WBTxRx::inject_radiotap_packet(int card_index, const uint8_t* packet_buff,
@@ -742,6 +813,44 @@ bool WBTxRx::process_received_data_packet(int wlan_idx, uint8_t stream_index,
                                           bool encrypted, const uint64_t nonce,
                                           const uint8_t* payload_and_enc_suffix,
                                           int payload_and_enc_suffix_size) {
+  if (encrypted &&
+      is_external_crypto_payload(payload_and_enc_suffix,
+                                 payload_and_enc_suffix_size)) {
+    if (!m_external_crypto || !m_external_crypto->is_loaded()) {
+      if (!m_logged_external_crypto_rx_missing) {
+        m_console->warn(
+            "Received external-encrypted payload but no external crypto plugin "
+            "is loaded");
+        m_logged_external_crypto_rx_missing = true;
+      }
+      return false;
+    }
+
+    ExternalCryptoPacketHeader header{};
+    std::memcpy(&header, payload_and_enc_suffix, sizeof(header));
+    const uint8_t* ciphertext =
+        payload_and_enc_suffix + sizeof(ExternalCryptoPacketHeader);
+    const int ciphertext_len =
+        payload_and_enc_suffix_size - sizeof(ExternalCryptoPacketHeader);
+    auto decrypted = std::make_shared<std::vector<uint8_t>>(ciphertext_len);
+    size_t decrypted_len = decrypted->size();
+    const auto before_decrypt = std::chrono::steady_clock::now();
+    const bool res = m_external_crypto->decrypt(
+        ciphertext, ciphertext_len, decrypted->data(), &decrypted_len,
+        header.key_id);
+    if (!res) {
+      return false;
+    }
+    decrypted->resize(decrypted_len);
+    if (m_options.debug_decrypt_time) {
+      m_packet_decrypt_time.add(std::chrono::steady_clock::now() -
+                                before_decrypt);
+    }
+    on_valid_data_packet(nonce, wlan_idx, stream_index, decrypted->data(),
+                         decrypted->size());
+    return true;
+  }
+
   std::shared_ptr<std::vector<uint8_t>> decrypted =
       std::make_shared<std::vector<uint8_t>>(
           payload_and_enc_suffix_size - crypto_aead_chacha20poly1305_ABYTES);

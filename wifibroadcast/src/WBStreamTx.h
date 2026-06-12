@@ -153,6 +153,7 @@ class WBStreamTx {
    * (pass encrypt=true on the inject cb)
    */
   void set_encryption(bool encrypt) { m_enable_encryption = encrypt; }
+  void set_external_crypto(bool enable) { m_use_external_crypto = enable; }
   /**
    * Approximation of the remaining items in the tx block / packets queue
    */
@@ -226,6 +227,7 @@ class WBStreamTx {
   void dirty_process_enqueued_frame(const EnqueuedBlock& block);
   void send_packet(const uint8_t* packet, int packet_len);
   std::atomic<bool> m_enable_encryption = true;
+  std::atomic<bool> m_use_external_crypto = false;
 
   // Retransmission logic
   struct SentPacket {

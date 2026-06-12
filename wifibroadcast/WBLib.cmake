@@ -32,6 +32,7 @@ target_sources(wifibroadcast PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/encryption/Encryption.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/encryption/EncryptionFsUtils.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/encryption/Decryptor.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/encryption/ExternalCryptoPlugin.cpp
         ##
         ${CMAKE_CURRENT_LIST_DIR}/src/dummy_link/DummyLink.cpp
 
@@ -108,6 +109,7 @@ target_include_directories(wifibroadcast PUBLIC ${sodium_INCLUDE_DIR})
 target_include_directories(wifibroadcast PUBLIC ${PCAP_INCLUDE_DIR})
 target_link_libraries(wifibroadcast PUBLIC ${PCAP_LIBRARY})
 target_link_libraries(wifibroadcast PUBLIC ${sodium_LIBRARY_RELEASE})
+target_link_libraries(wifibroadcast PUBLIC ${CMAKE_DL_LIBS})
 
 # for some reason, we also need to manually link pthread
 find_package(Threads REQUIRED)
