@@ -342,7 +342,9 @@ void WBStreamTx::process_enqueued_block(
 void WBStreamTx::dirty_process_enqueued_frame(
     const WBStreamTx::EnqueuedBlock& block) {
   // TODO: Figure out the ideal fragment size for this frame
-  const int MTU = 1440;
+  // Reserve the external packet header and provider AEAD overhead. The normal
+  // path keeps its existing MTU; only opt-in external crypto pays this cost.
+  const int MTU = m_use_external_crypto.load() ? 1424 : 1440;
   const int n_primary_fragments = blocksize::div_ceil(block.frame->size(), MTU);
   const int n_secondary_fragments = calculate_n_secondary_fragments(
       n_primary_fragments, block.fec_overhead_perc);

@@ -11,13 +11,17 @@
 namespace {
 constexpr const char* kExternalCryptoEnvVar = "OPENHD_VIDEO_CRYPTO_SO";
 constexpr const char* kDefaultExternalCryptoPath =
+    "/usr/local/lib/openhd/plugins/libopenhd_video_crypto.so";
+constexpr const char* kLegacyExternalCryptoPath =
     "/usr/local/lib/openhd/libohd_video_crypto.so";
 }
 
 wb::ExternalCryptoPlugin::~ExternalCryptoPlugin() {
 #ifdef __linux__
-  if (m_shutdown) {
-    m_shutdown();
+  if (m_provider && m_provider->shutdown) {
+    m_provider->shutdown();
+  } else if (m_legacy_shutdown) {
+    m_legacy_shutdown();
   }
   if (m_handle) {
     dlclose(m_handle);
@@ -40,45 +44,65 @@ bool wb::ExternalCryptoPlugin::load(const std::string& path, bool is_air) {
   }
 
   m_handle = dlopen(resolved_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!m_handle && path.empty() &&
+      resolved_path == kDefaultExternalCryptoPath) {
+    resolved_path = kLegacyExternalCryptoPath;
+    m_handle = dlopen(resolved_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  }
   if (!m_handle) {
+    const char* load_error = dlerror();
     wifibroadcast::log::get_default()->debug(
         "External crypto plugin not loaded from {}: {}", resolved_path,
-        dlerror() ? dlerror() : "unknown error");
+        load_error ? load_error : "unknown error");
     return false;
   }
 
-  m_init = reinterpret_cast<init_fn>(
-      dlsym(m_handle, "openhd_video_crypto_init"));
-  m_shutdown = reinterpret_cast<shutdown_fn>(
-      dlsym(m_handle, "openhd_video_crypto_shutdown"));
-  m_encrypt = reinterpret_cast<encrypt_fn>(
-      dlsym(m_handle, "openhd_video_crypto_encrypt"));
-  m_decrypt = reinterpret_cast<decrypt_fn>(
-      dlsym(m_handle, "openhd_video_crypto_decrypt"));
-
-  if (!m_init || !m_shutdown || !m_encrypt || !m_decrypt) {
+  auto get_provider = reinterpret_cast<openhd_crypto_get_provider_fn>(
+      dlsym(m_handle, OPENHD_CRYPTO_ENTRYPOINT));
+  m_provider = get_provider ? get_provider() : nullptr;
+  const bool provider_compatible = m_provider &&
+      m_provider->struct_size >= sizeof(openhd_crypto_provider) &&
+      m_provider->abi_version == OPENHD_CRYPTO_ABI_VERSION &&
+      m_provider->wire_format_id != 0U && m_provider->init &&
+      m_provider->shutdown && m_provider->encrypt && m_provider->decrypt;
+  legacy_init_fn legacy_init = nullptr;
+  if (!provider_compatible) {
+    m_provider = nullptr;
+    legacy_init = reinterpret_cast<legacy_init_fn>(
+        dlsym(m_handle, "openhd_video_crypto_init"));
+    m_legacy_shutdown = reinterpret_cast<legacy_shutdown_fn>(
+        dlsym(m_handle, "openhd_video_crypto_shutdown"));
+    m_legacy_encrypt = reinterpret_cast<legacy_encrypt_fn>(
+        dlsym(m_handle, "openhd_video_crypto_encrypt"));
+    m_legacy_decrypt = reinterpret_cast<legacy_decrypt_fn>(
+        dlsym(m_handle, "openhd_video_crypto_decrypt"));
+  }
+  if (!provider_compatible &&
+      (!legacy_init || !m_legacy_shutdown || !m_legacy_encrypt ||
+       !m_legacy_decrypt)) {
     wifibroadcast::log::get_default()->warn(
         "External crypto plugin {} is missing required symbols",
         resolved_path);
     dlclose(m_handle);
     m_handle = nullptr;
-    m_init = nullptr;
-    m_shutdown = nullptr;
-    m_encrypt = nullptr;
-    m_decrypt = nullptr;
+    m_provider = nullptr;
+    m_legacy_shutdown = nullptr;
+    m_legacy_encrypt = nullptr;
+    m_legacy_decrypt = nullptr;
     return false;
   }
 
-  const int rc = m_init(is_air ? 1 : 0);
+  const int rc = provider_compatible ? m_provider->init(is_air ? 1 : 0)
+                                     : legacy_init(is_air ? 1 : 0);
   if (rc != 0) {
     wifibroadcast::log::get_default()->warn(
         "External crypto plugin init failed with code {}", rc);
     dlclose(m_handle);
     m_handle = nullptr;
-    m_init = nullptr;
-    m_shutdown = nullptr;
-    m_encrypt = nullptr;
-    m_decrypt = nullptr;
+    m_provider = nullptr;
+    m_legacy_shutdown = nullptr;
+    m_legacy_encrypt = nullptr;
+    m_legacy_decrypt = nullptr;
     return false;
   }
 
@@ -96,17 +120,25 @@ bool wb::ExternalCryptoPlugin::load(const std::string& path, bool is_air) {
 bool wb::ExternalCryptoPlugin::encrypt(const uint8_t* in, size_t in_len,
                                        uint8_t* out, size_t* out_len,
                                        uint64_t* key_id) const {
-  if (!m_encrypt) {
+  if ((!m_provider || !m_provider->encrypt) && !m_legacy_encrypt) {
     return false;
   }
-  return m_encrypt(in, in_len, out, out_len, key_id) == 0;
+  if (m_provider) {
+    const size_t capacity = *out_len;
+    return m_provider->encrypt(in, in_len, out, capacity, out_len, key_id) == 0;
+  }
+  return m_legacy_encrypt(in, in_len, out, out_len, key_id) == 0;
 }
 
 bool wb::ExternalCryptoPlugin::decrypt(const uint8_t* in, size_t in_len,
                                        uint8_t* out, size_t* out_len,
                                        uint64_t key_id) const {
-  if (!m_decrypt) {
+  if ((!m_provider || !m_provider->decrypt) && !m_legacy_decrypt) {
     return false;
   }
-  return m_decrypt(in, in_len, out, out_len, key_id) == 0;
+  if (m_provider) {
+    const size_t capacity = *out_len;
+    return m_provider->decrypt(in, in_len, out, capacity, out_len, key_id) == 0;
+  }
+  return m_legacy_decrypt(in, in_len, out, out_len, key_id) == 0;
 }

@@ -203,8 +203,17 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
   const auto before_encrypt = std::chrono::steady_clock::now();
 
   bool used_external_crypto = false;
-  if (use_external_crypto && m_external_crypto &&
-      m_external_crypto->is_loaded()) {
+  if (use_external_crypto &&
+      (!m_external_crypto || !m_external_crypto->is_loaded())) {
+    if (!m_logged_external_crypto_fallback) {
+      m_console->error(
+          "External video encryption requested but its plugin is unavailable; "
+          "dropping video packets to prevent plaintext transmission");
+      m_logged_external_crypto_fallback = true;
+    }
+    return;
+  }
+  if (use_external_crypto) {
     ExternalCryptoPacketHeader header{};
     header.magic = kExternalCryptoMagic;
     header.version = kExternalCryptoVersion;
@@ -229,13 +238,17 @@ void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
     }
   }
 
-  if (!used_external_crypto) {
-    if (use_external_crypto && !m_logged_external_crypto_fallback) {
-      m_console->warn(
-          "External crypto requested but unavailable; falling back to current "
-          "wifibroadcast payload handling");
+  if (use_external_crypto && !used_external_crypto) {
+    if (!m_logged_external_crypto_fallback) {
+      m_console->error(
+          "External video encryption failed; dropping video packets to "
+          "prevent plaintext transmission");
       m_logged_external_crypto_fallback = true;
     }
+    return;
+  }
+
+  if (!used_external_crypto) {
     m_encryptor->set_encryption_enabled(encrypt);
     payload_len = m_encryptor->authenticate_and_encrypt(
         this_packet_nonce, data, data_len, encrypted_data_p);
