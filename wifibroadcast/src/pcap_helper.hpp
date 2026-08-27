@@ -93,6 +93,7 @@ static pcap_t *open_pcap_tx(const std::string &wlan) {
   if (p == nullptr) {
     wifibroadcast::log::get_default()->error(
         "Unable to open interface {} in pcap: {}", wlan.c_str(), errbuf);
+    return nullptr;
   }
   if (pcap_set_snaplen(p, 4096) != 0)
     wifibroadcast::log::get_default()->warn("set_snaplen failed");

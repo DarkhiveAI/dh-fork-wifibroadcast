@@ -199,6 +199,10 @@ class WBTxRx {
    */
   void start_receiving();
   void stop_receiving();
+  // Reopen pcap/raw-socket handles after one or more USB WiFi cards were
+  // unplugged and appeared again. Stream handlers and crypto state remain
+  // attached to this WBTxRx instance.
+  bool restart_interfaces(std::vector<wifibroadcast::WifiCard> wifi_cards);
 
   // Statistics
   struct TxStats {
@@ -319,7 +323,7 @@ class WBTxRx {
   const Options m_options;
   std::shared_ptr<spdlog::logger> m_console;
   std::shared_ptr<RadiotapHeaderTxHolder> m_session_key_radiotap_header;
-  const std::vector<wifibroadcast::WifiCard> m_wifi_cards;
+  std::vector<wifibroadcast::WifiCard> m_wifi_cards;
   std::chrono::steady_clock::time_point m_session_key_next_announce_ts{};
   Ieee80211HeaderOpenHD m_tx_ieee80211_hdr_openhd{};
   std::array<uint8_t, PCAP_MAX_PACKET_SIZE> m_tx_packet_buff{};
@@ -361,6 +365,8 @@ class WBTxRx {
     int tx_sockfd = -1;
   };
   std::vector<PcapTxRx> m_pcap_handles;
+  bool open_interfaces();
+  void close_interfaces();
   // temporary
   std::mutex m_tx_mutex;
   bool keep_receiving = true;
@@ -395,6 +401,7 @@ class WBTxRx {
   std::atomic_bool m_disable_all_transmissions = false;
   std::atomic<bool> m_enable_redundant_tx = false;
   std::vector<bool> m_card_is_disconnected;
+  std::atomic_bool m_fatal_error_reported = false;
   BitrateCalculator m_tx_bitrate_calculator_excluding_overhead{};
   BitrateCalculator m_tx_bitrate_calculator_including_overhead{};
   PacketsPerSecondCalculator m_tx_packets_per_second_calculator{};

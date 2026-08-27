@@ -4,7 +4,9 @@
 
 #include "WBTxRx.h"
 
+#include <algorithm>
 #include <cstring>
+#include <stdexcept>
 #include <utility>
 
 #include "../radiotap/RadiotapHeaderRx.hpp"
@@ -74,41 +76,8 @@ WBTxRx::WBTxRx(
     m_per_card_calc.push_back(tmp);
     m_card_is_disconnected[i] = false;
   }
-  for (int i = 0; i < m_wifi_cards.size(); i++) {
-    auto wifi_card = m_wifi_cards[i];
-    if (wifi_card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_GND) {
-      m_optional_dummy_link = std::make_unique<DummyLink>(false);
-    } else if (wifi_card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_AIR) {
-      m_optional_dummy_link = std::make_unique<DummyLink>(true);
-    } else {
-      PcapTxRx pcapTxRx{};
-      // RX part - using pcap
-      pcapTxRx.rx = wifibroadcast::pcap_helper::open_pcap_rx(wifi_card.name);
-      if (m_options.pcap_rx_set_direction) {
-        const auto ret = pcap_setdirection(pcapTxRx.rx, PCAP_D_IN);
-        if (ret != 0) {
-          m_console->debug("pcap_setdirection() returned {}", ret);
-        }
-      }
-      auto rx_pollfd = pcap_get_selectable_fd(pcapTxRx.rx);
-      m_receive_pollfds[i].fd = rx_pollfd;
-      m_receive_pollfds[i].events = POLLIN;
-      // TX part - using raw socket or pcap
-      if (m_options.tx_without_pcap) {
-        pcapTxRx.tx_sockfd = open_wifi_interface_as_raw_socket(wifi_card.name);
-        if (m_options.set_tx_sock_qdisc_bypass) {
-          wifibroadcast::pcap_helper::set_tx_sock_qdisc_bypass(
-              pcapTxRx.tx_sockfd);
-        }
-      } else {
-        pcapTxRx.tx = wifibroadcast::pcap_helper::open_pcap_tx(wifi_card.name);
-        if (m_options.set_tx_sock_qdisc_bypass) {
-          wifibroadcast::pcap_helper::pcap_set_tx_sock_qdisc_bypass(
-              pcapTxRx.tx);
-        }
-      }
-      m_pcap_handles.push_back(pcapTxRx);
-    }
+  if (!open_interfaces()) {
+    throw std::runtime_error("Cannot open wifibroadcast interfaces");
   }
   wb::KeyPairTxRx keypair{};
   if (m_options.secure_keypair.has_value()) {
@@ -132,12 +101,81 @@ WBTxRx::WBTxRx(
 
 WBTxRx::~WBTxRx() {
   stop_receiving();
-  for (auto& fd : m_receive_pollfds) {
-    close(fd.fd);
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  close_interfaces();
+}
+
+bool WBTxRx::open_interfaces() {
+  m_receive_pollfds.assign(m_wifi_cards.size(), pollfd{-1, 0, 0});
+  m_pcap_handles.clear();
+  m_pcap_handles.reserve(m_wifi_cards.size());
+  m_optional_dummy_link = nullptr;
+  for (std::size_t i = 0; i < m_wifi_cards.size(); ++i) {
+    const auto& wifi_card = m_wifi_cards[i];
+    PcapTxRx handle{};
+    if (wifi_card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_GND) {
+      m_optional_dummy_link = std::make_unique<DummyLink>(false);
+      m_pcap_handles.push_back(handle);
+      continue;
+    }
+    if (wifi_card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_AIR) {
+      m_optional_dummy_link = std::make_unique<DummyLink>(true);
+      m_pcap_handles.push_back(handle);
+      continue;
+    }
+
+    handle.rx = wifibroadcast::pcap_helper::open_pcap_rx(wifi_card.name);
+    if (!handle.rx) {
+      close_interfaces();
+      return false;
+    }
+    if (m_options.pcap_rx_set_direction) {
+      const auto ret = pcap_setdirection(handle.rx, PCAP_D_IN);
+      if (ret != 0) {
+        m_console->debug("pcap_setdirection() returned {}", ret);
+      }
+    }
+    const auto rx_pollfd = pcap_get_selectable_fd(handle.rx);
+    if (rx_pollfd < 0) {
+      pcap_close(handle.rx);
+      handle.rx = nullptr;
+      close_interfaces();
+      return false;
+    }
+    m_receive_pollfds[i].fd = rx_pollfd;
+    m_receive_pollfds[i].events = POLLIN;
+    if (m_options.tx_without_pcap) {
+      handle.tx_sockfd = open_wifi_interface_as_raw_socket(wifi_card.name);
+      if (handle.tx_sockfd < 0) {
+        pcap_close(handle.rx);
+        handle.rx = nullptr;
+        close_interfaces();
+        return false;
+      }
+      if (m_options.set_tx_sock_qdisc_bypass) {
+        wifibroadcast::pcap_helper::set_tx_sock_qdisc_bypass(handle.tx_sockfd);
+      }
+    } else {
+      handle.tx = wifibroadcast::pcap_helper::open_pcap_tx(wifi_card.name);
+      if (!handle.tx) {
+        pcap_close(handle.rx);
+        handle.rx = nullptr;
+        close_interfaces();
+        return false;
+      }
+      if (m_options.set_tx_sock_qdisc_bypass) {
+        wifibroadcast::pcap_helper::pcap_set_tx_sock_qdisc_bypass(handle.tx);
+      }
+    }
+    m_pcap_handles.push_back(handle);
   }
+  return true;
+}
+
+void WBTxRx::close_interfaces() {
   for (auto& pcapTxRx : m_pcap_handles) {
     if (pcapTxRx.rx == pcapTxRx.tx) {
-      pcap_close(pcapTxRx.rx);
+      if (pcapTxRx.rx) pcap_close(pcapTxRx.rx);
       pcapTxRx.rx = nullptr;
       pcapTxRx.tx = nullptr;
     } else {
@@ -151,9 +189,33 @@ WBTxRx::~WBTxRx() {
         close(pcapTxRx.tx_sockfd);
       }
     }
-    // pcap_close(pcapTxRx.rx);
-    // pcap_close(pcapTxRx.tx);
   }
+  m_pcap_handles.clear();
+  for (auto& pollfd : m_receive_pollfds) pollfd = {-1, 0, 0};
+  m_optional_dummy_link = nullptr;
+}
+
+bool WBTxRx::restart_interfaces(
+    std::vector<wifibroadcast::WifiCard> wifi_cards) {
+  if (wifi_cards.size() != m_wifi_cards.size() || wifi_cards.empty()) {
+    m_console->error("Cannot restart with {} cards, expected {}",
+                     wifi_cards.size(), m_wifi_cards.size());
+    return false;
+  }
+  stop_receiving();
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  close_interfaces();
+  m_wifi_cards = std::move(wifi_cards);
+  if (!open_interfaces()) {
+    m_console->error("Failed reopening wifibroadcast interfaces");
+    return false;
+  }
+  std::fill(m_card_is_disconnected.begin(), m_card_is_disconnected.end(),
+            false);
+  m_fatal_error_reported = false;
+  start_receiving();
+  m_console->info("Wifibroadcast interfaces reopened successfully");
+  return true;
 }
 
 void WBTxRx::tx_inject_packet(const uint8_t stream_index, const uint8_t* data,
@@ -364,7 +426,8 @@ bool WBTxRx::inject_radiotap_packet(int card_index, const uint8_t* packet_buff,
     }
     m_tx_stats.count_tx_dropped_packets++;
     if (has_fatal_error) {
-      if (m_fatal_error_cb != nullptr) {
+      if (!m_fatal_error_reported.exchange(true) &&
+          m_fatal_error_cb != nullptr) {
         m_fatal_error_cb(errno);
       }
     }
@@ -432,6 +495,10 @@ void WBTxRx::loop_receive_packets() {
           // we should only get errors here if the card is disconnected
           m_n_receiver_errors++;
           m_card_is_disconnected[i] = true;
+          if (!m_fatal_error_reported.exchange(true) &&
+              m_fatal_error_cb != nullptr) {
+            m_fatal_error_cb(ENODEV);
+          }
           // limit logging here
           const auto elapsed =
               std::chrono::steady_clock::now() - m_last_receiver_error_log;

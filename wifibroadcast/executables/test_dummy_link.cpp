@@ -81,6 +81,20 @@ static void test_wb_tx_rx_dummy() {
   const auto rx_stats = tx_rx_gnd->get_rx_stats();
   // RX should have received all the packets
   assert(rx_stats.count_p_valid == dummy_packets1.size());
+
+  // Reopen both runtimes without replacing either WBTxRx object. The handlers,
+  // encryption session, and callers' shared pointers must remain valid.
+  assert(tx_rx_air->restart_interfaces(
+      {wifibroadcast::create_card_emulate(true)}));
+  assert(tx_rx_gnd->restart_interfaces(
+      {wifibroadcast::create_card_emulate(false)}));
+  auto after_restart = GenericHelper::createRandomDataBuffers(1, 256, 256);
+  tx_rx_air->tx_inject_packet(
+      5, after_restart[0].data(), after_restart[0].size(),
+      radiotap_header_holder_tx->thread_safe_get(), false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  assert(tx_rx_gnd->get_rx_stats().count_p_valid ==
+         dummy_packets1.size() + 1);
   tx_rx_air->stop_receiving();
   tx_rx_gnd->stop_receiving();
 }

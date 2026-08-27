@@ -22,6 +22,7 @@ static int open_wifi_interface_as_raw_socket(const std::string &wifi) {
   int sock = socket(AF_PACKET, SOCK_RAW, 0);
   if (sock == -1) {
     console->error("open socket failed {} {}", wifi.c_str(), strerror(errno));
+    return -1;
   }
 
   ll_addr.sll_family = AF_PACKET;
@@ -32,12 +33,16 @@ static int open_wifi_interface_as_raw_socket(const std::string &wifi) {
 
   if (ioctl(sock, SIOCGIFINDEX, &ifr) < 0) {
     console->error("ioctl(SIOCGIFINDEX) failed");
+    close(sock);
+    return -1;
   }
 
   ll_addr.sll_ifindex = ifr.ifr_ifindex;
 
   if (ioctl(sock, SIOCGIFHWADDR, &ifr) < 0) {
     console->error("ioctl(SIOCGIFHWADDR) failed");
+    close(sock);
+    return -1;
   }
 
   memcpy(ll_addr.sll_addr, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
@@ -45,6 +50,7 @@ static int open_wifi_interface_as_raw_socket(const std::string &wifi) {
   if (bind(sock, (struct sockaddr *)&ll_addr, sizeof(ll_addr)) == -1) {
     close(sock);
     console->error("bind failed");
+    return -1;
   }
   SocketHelper::debug_send_rcv_timeout(sock, console);
   // const auto wanted_send_timeout=std::chrono::milliseconds(20);
