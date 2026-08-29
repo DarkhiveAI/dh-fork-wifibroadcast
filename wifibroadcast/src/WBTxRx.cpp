@@ -14,6 +14,10 @@
 #include "SchedulingHelper.hpp"
 #include "pcap_helper.hpp"
 #include "raw_socket_helper.hpp"
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+#include "devourer/DevourerTransport.h"
+#include "RxPacket.h"
+#endif
 
 namespace {
 
@@ -40,6 +44,16 @@ bool is_external_crypto_payload(const uint8_t* data, int data_len) {
 }
 
 }  // namespace
+
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+class WBTxRx::DevourerHolder {
+ public:
+  explicit DevourerHolder(
+      std::unique_ptr<wifibroadcast::devourer_transport::Transport> value)
+      : transport(std::move(value)) {}
+  std::unique_ptr<wifibroadcast::devourer_transport::Transport> transport;
+};
+#endif
 
 WBTxRx::WBTxRx(
     std::vector<wifibroadcast::WifiCard> wifi_cards1, Options options1,
@@ -110,6 +124,36 @@ bool WBTxRx::open_interfaces() {
   m_pcap_handles.clear();
   m_pcap_handles.reserve(m_wifi_cards.size());
   m_optional_dummy_link = nullptr;
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (m_options.use_devourer) {
+    std::vector<std::string> names;
+    names.reserve(m_wifi_cards.size());
+    for (const auto& card : m_wifi_cards) {
+      if (card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_AIR ||
+          card.type == wifibroadcast::WIFI_CARD_TYPE_EMULATE_GND) {
+        m_console->error("Devourer cannot be combined with an emulated card");
+        return false;
+      }
+      names.push_back(card.name);
+    }
+    auto transport =
+        std::make_unique<wifibroadcast::devourer_transport::Transport>(
+            std::move(names),
+            wifibroadcast::devourer_transport::Channel{
+                m_options.devourer_frequency_mhz,
+                m_options.devourer_channel_width_mhz});
+    if (!transport->open()) return false;
+    m_devourer = std::make_unique<DevourerHolder>(std::move(transport));
+    m_pcap_handles.resize(m_wifi_cards.size());
+    m_console->info("Using OpenIPC Devourer userspace WiFi backend");
+    return true;
+  }
+#else
+  if (m_options.use_devourer) {
+    m_console->error("Devourer backend requested but not compiled in");
+    return false;
+  }
+#endif
   for (std::size_t i = 0; i < m_wifi_cards.size(); ++i) {
     const auto& wifi_card = m_wifi_cards[i];
     PcapTxRx handle{};
@@ -173,6 +217,11 @@ bool WBTxRx::open_interfaces() {
 }
 
 void WBTxRx::close_interfaces() {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (m_devourer) {
+    m_devourer.reset();
+  }
+#endif
   for (auto& pcapTxRx : m_pcap_handles) {
     if (pcapTxRx.rx == pcapTxRx.tx) {
       if (pcapTxRx.rx) pcap_close(pcapTxRx.rx);
@@ -380,6 +429,13 @@ bool WBTxRx::inject_radiotap_packet(int card_index, const uint8_t* packet_buff,
   if (m_optional_dummy_link) {
     m_optional_dummy_link->tx_radiotap(packet_buff, packet_size);
     len_injected = packet_size;
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  } else if (m_devourer) {
+    len_injected = m_devourer->transport->send(card_index, packet_buff,
+                                               packet_size)
+                       ? packet_size
+                       : -1;
+#endif
   } else if (m_options.tx_without_pcap) {
     len_injected = (int)write(m_pcap_handles[card_index].tx_sockfd, packet_buff,
                               packet_size);
@@ -410,7 +466,11 @@ bool WBTxRx::inject_radiotap_packet(int card_index, const uint8_t* packet_buff,
     // This basically should never fail - if the tx queue is full, pcap seems to
     // wait ?!
     bool has_fatal_error = false;
-    if (m_options.tx_without_pcap) {
+    if (m_options.use_devourer) {
+      m_console->warn("devourer - unable to inject packet size:{}",
+                      packet_size);
+      has_fatal_error = true;
+    } else if (m_options.tx_without_pcap) {
       m_console->warn(
           "raw sock - unable to inject packet size:{} ret:{} err:[{}]",
           packet_size, len_injected, strerror(errno));
@@ -428,7 +488,7 @@ bool WBTxRx::inject_radiotap_packet(int card_index, const uint8_t* packet_buff,
     if (has_fatal_error) {
       if (!m_fatal_error_reported.exchange(true) &&
           m_fatal_error_cb != nullptr) {
-        m_fatal_error_cb(errno);
+        m_fatal_error_cb(m_options.use_devourer ? ENODEV : errno);
       }
     }
     return false;
@@ -607,7 +667,14 @@ void WBTxRx::on_new_packet(const uint8_t wlan_idx, const uint8_t* pkt,
     }
     return;
   }
-  if (parsedPacket->radiotap_f_bad_fcs) {
+  on_new_parsed_packet(wlan_idx, pkt, pkt_len, *parsedPacket, true);
+}
+
+void WBTxRx::on_new_parsed_packet(
+    const uint8_t wlan_idx, const uint8_t* pkt, const int pkt_len,
+    const radiotap::rx::ParsedRxRadiotapPacket& parsed_packet,
+    const bool has_radiotap) {
+  if (parsed_packet.radiotap_f_bad_fcs) {
     // Bad FCS - treat as not a usable packet
     if (m_options.advanced_debugging_rx) {
       m_console->debug("Discarding packet due to bad FCS!");
@@ -617,8 +684,8 @@ void WBTxRx::on_new_packet(const uint8_t wlan_idx, const uint8_t* pkt,
   // m_console->debug("{}",radiotap::util::radiotap_header_to_string(pkt,pkt_len));
   // m_console->debug("{}",radiotap::rx::parsed_radiotap_to_string(parsedPacket.value()));
   // m_per_card_calc[wlan_idx]->rf_aggregator.on_valid_openhd_packet(parsedPacket.value());
-  const uint8_t* pkt_payload = parsedPacket->payload;
-  const size_t pkt_payload_size = parsedPacket->payloadSize;
+  const uint8_t* pkt_payload = parsed_packet.payload;
+  const size_t pkt_payload_size = parsed_packet.payloadSize;
   m_rx_stats.count_p_any++;
   m_rx_stats.count_bytes_any += pkt_payload_size;
   m_rx_stats_per_card[wlan_idx].count_p_any++;
@@ -626,7 +693,7 @@ void WBTxRx::on_new_packet(const uint8_t wlan_idx, const uint8_t* pkt,
     m_pollution_total_rx_packets++;
   }
   const auto& rx_iee80211_hdr_openhd =
-      *((Ieee80211HeaderOpenHD*)parsedPacket->ieee80211Header);
+      *((Ieee80211HeaderOpenHD*)parsed_packet.ieee80211Header);
   // m_console->debug(parsedPacket->ieee80211Header->header_as_string());
   if (!rx_iee80211_hdr_openhd.is_data_frame()) {
     if (m_options.advanced_debugging_rx) {
@@ -638,15 +705,15 @@ void WBTxRx::on_new_packet(const uint8_t wlan_idx, const uint8_t* pkt,
   }
   // All these edge cases should NEVER happen if using a proper tx/rx setup and
   // the wifi driver isn't complete crap
-  if (parsedPacket->payloadSize <= 0 ||
-      parsedPacket->payloadSize > RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE) {
+  if (parsed_packet.payloadSize <= 0 ||
+      parsed_packet.payloadSize > RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE) {
     m_console->warn("Discarding packet due to no actual payload !");
     return;
   }
   // Generic packet validation end - now to the openhd specific validation(s)
-  if (parsedPacket->payloadSize > RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE) {
+  if (parsed_packet.payloadSize > RAW_WIFI_FRAME_MAX_PAYLOAD_SIZE) {
     m_console->warn("Discarding packet due to payload exceeding max {}",
-                    (int)parsedPacket->payloadSize);
+                    (int)parsed_packet.payloadSize);
     return;
   }
   if (!rx_iee80211_hdr_openhd.has_valid_air_gnd_id()) {
@@ -701,13 +768,16 @@ void WBTxRx::on_new_packet(const uint8_t wlan_idx, const uint8_t* pkt,
   //  yet
   m_rx_stats.curr_n_likely_openhd_packets++;
   const auto nonce = rx_iee80211_hdr_openhd.get_nonce();
+  const std::optional<radiotap::rx::ParsedRxRadiotapPacket> parsed_packet_opt{
+      parsed_packet};
   if (radio_port.multiplex_index == STREAM_INDEX_SESSION_KEY_PACKETS) {
-    process_session_stream_packet(wlan_idx, radio_port, parsedPacket,
+    process_session_stream_packet(wlan_idx, radio_port, parsed_packet_opt,
                                   pkt_payload_size, nonce);
   } else {
-    process_common_stream_packet(wlan_idx, radio_port, pkt, pkt_len,
-                                 parsedPacket, pkt_payload, pkt_payload_size,
-                                 nonce);
+    process_common_stream_packet(wlan_idx, radio_port,
+                                 has_radiotap ? pkt : nullptr,
+                                 has_radiotap ? pkt_len : 0, parsed_packet_opt,
+                                 pkt_payload, pkt_payload_size, nonce);
   }
 }
 
@@ -800,8 +870,8 @@ void WBTxRx::process_common_stream_packet(
       wlan_idx, radio_port.multiplex_index, radio_port.encrypted, nonce,
       pkt_payload, pkt_payload_size);
   if (valid) {
-    if (m_options.rx_radiotap_debug_level == 1 ||
-        m_options.rx_radiotap_debug_level == 4) {
+    if (pkt != nullptr && (m_options.rx_radiotap_debug_level == 1 ||
+                           m_options.rx_radiotap_debug_level == 4)) {
       m_console->debug("{}",
                        radiotap::util::radiotap_header_to_string(pkt, pkt_len));
     }
@@ -1013,18 +1083,100 @@ void WBTxRx::on_valid_data_packet(uint64_t nonce, int wlan_index,
 
 void WBTxRx::start_receiving() {
   keep_receiving = true;
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (m_devourer) {
+    m_devourer->transport->start_rx(
+        [this](const int card_index, const Packet& packet) {
+          if (packet.RxAtrib.pkt_rpt_type != RX_PACKET_TYPE::NORMAL_RX ||
+              packet.RxAtrib.crc_err || packet.RxAtrib.icv_err ||
+              packet.Data.size() < Ieee80211HeaderRaw::SIZE_BYTES + 4) {
+            return;
+          }
+          std::lock_guard<std::mutex> guard(m_rx_mutex);
+          const size_t frame_size = packet.Data.size() - 4;
+          radiotap::rx::KeyRfIndicators adapter;
+          std::vector<radiotap::rx::KeyRfIndicators> paths;
+          int strongest_path = -1;
+          uint8_t strongest_raw = 0;
+          for (int i = 0; i < 4; ++i) {
+            const uint8_t raw = packet.RxAtrib.rssi[i];
+            if (raw == 0) continue;
+            if (raw > strongest_raw) {
+              strongest_raw = raw;
+              strongest_path = i;
+            }
+            radiotap::rx::KeyRfIndicators indicators;
+            indicators.radiotap_dbm_antsignal =
+                static_cast<int8_t>(static_cast<int>(raw) - 110);
+            indicators.radiotap_dbm_antnoise = static_cast<int8_t>(
+                static_cast<int>(raw) - 110 - packet.RxAtrib.snr[i] / 2);
+            paths.push_back(indicators);
+          }
+          if (strongest_path >= 0) {
+            adapter.radiotap_dbm_antsignal = static_cast<int8_t>(
+                static_cast<int>(strongest_raw) - 110);
+            adapter.radiotap_dbm_antnoise = static_cast<int8_t>(
+                static_cast<int>(strongest_raw) - 110 -
+                packet.RxAtrib.snr[strongest_path] / 2);
+          }
+          const auto* frame = packet.Data.data();
+          const radiotap::rx::ParsedRxRadiotapPacket parsed{
+              reinterpret_cast<const Ieee80211HeaderRaw*>(frame),
+              frame + Ieee80211HeaderRaw::SIZE_BYTES,
+              frame_size - Ieee80211HeaderRaw::SIZE_BYTES, false, adapter,
+              std::move(paths)};
+          on_new_parsed_packet(static_cast<uint8_t>(card_index), nullptr, 0,
+                               parsed, false);
+        },
+        [this](const int error) {
+          if (!m_fatal_error_reported.exchange(true) && m_fatal_error_cb) {
+            m_fatal_error_cb(error);
+          }
+        });
+    return;
+  }
+#endif
   m_receive_thread =
       std::make_unique<std::thread>(&WBTxRx::loop_receive_packets, this);
 }
 
 void WBTxRx::stop_receiving() {
   keep_receiving = false;
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (m_devourer) m_devourer->transport->stop_rx();
+#endif
   if (m_receive_thread != nullptr) {
     if (m_receive_thread->joinable()) {
       m_receive_thread->join();
     }
     m_receive_thread = nullptr;
   }
+}
+
+bool WBTxRx::set_devourer_channel(const int frequency_mhz,
+                                  const int channel_width_mhz) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  return m_devourer && m_devourer->transport->set_channel(
+                            {frequency_mhz, channel_width_mhz});
+#else
+  (void)frequency_mhz;
+  (void)channel_width_mhz;
+  return false;
+#endif
+}
+
+void WBTxRx::set_devourer_tx_power_index_override(const int card_index,
+                                                  const int index) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  if (m_devourer) {
+    m_devourer->transport->set_tx_power_index_override(card_index, index);
+  }
+#else
+  (void)card_index;
+  (void)index;
+#endif
 }
 
 void WBTxRx::announce_session_key_if_needed() {

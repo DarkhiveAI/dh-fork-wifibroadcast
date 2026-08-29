@@ -118,6 +118,11 @@ class WBTxRx {
     // Optional closed-source crypto backend. Empty path means use
     // OPENHD_VIDEO_CRYPTO_SO or the default OpenHD install path.
     std::string external_crypto_plugin_path;
+    // Bypass the Linux networking stack and drive supported Realtek USB
+    // adapters directly through OpenIPC Devourer.
+    bool use_devourer = false;
+    int devourer_frequency_mhz = 0;
+    int devourer_channel_width_mhz = 20;
   };
   /**
    * @param wifi_cards card(s) used for tx / rx
@@ -281,6 +286,11 @@ class WBTxRx {
   // (Hints at power issues)
   bool get_card_has_disconnected(int card_idx);
   void set_enable_redundant_tx(bool enable);
+  // Runtime radio controls for the userspace Devourer backend. They return
+  // false/no-op when the Linux backend is active.
+  bool set_devourer_channel(int frequency_mhz, int channel_width_mhz);
+  void set_devourer_tx_power_index_override(int card_index, int index);
+  [[nodiscard]] bool uses_devourer() const { return m_options.use_devourer; }
   // For development only
   std::shared_ptr<DummyLink> get_dummy_link();
 
@@ -365,10 +375,15 @@ class WBTxRx {
     int tx_sockfd = -1;
   };
   std::vector<PcapTxRx> m_pcap_handles;
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  class DevourerHolder;
+  std::unique_ptr<DevourerHolder> m_devourer;
+#endif
   bool open_interfaces();
   void close_interfaces();
   // temporary
   std::mutex m_tx_mutex;
+  std::mutex m_rx_mutex;
   bool keep_receiving = true;
   int m_n_receiver_errors = 0;
   std::unique_ptr<std::thread> m_receive_thread;
@@ -442,6 +457,10 @@ class WBTxRx {
       const uint8_t* pkt_payload, size_t pkt_payload_size, uint64_t nonce);
   // called every time we have a new (raw) data packet
   void on_new_packet(uint8_t wlan_idx, const uint8_t* pkt, int pkt_len);
+  void on_new_parsed_packet(
+      uint8_t wlan_idx, const uint8_t* pkt, int pkt_len,
+      const radiotap::rx::ParsedRxRadiotapPacket& parsed_packet,
+      bool has_radiotap);
   // verify and decrypt the packet if possible
   // returns true if packet could be decrypted successfully
   bool process_received_data_packet(int wlan_idx, uint8_t stream_index,

@@ -51,6 +51,14 @@ target_sources(wifibroadcast PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/radiotap/RadiotapRxRfAggregator.cpp
 )
 
+if(TARGET devourer)
+    target_sources(wifibroadcast PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src/devourer/DevourerTransport.cpp)
+    target_compile_definitions(wifibroadcast PUBLIC
+        WIFIBROADCAST_WITH_DEVOURER=1)
+    target_link_libraries(wifibroadcast PUBLIC devourer)
+endif()
+
 target_include_directories(wifibroadcast PUBLIC
         ${CMAKE_CURRENT_LIST_DIR}/src/HelperSources
         ${CMAKE_CURRENT_LIST_DIR}/../../../inc
