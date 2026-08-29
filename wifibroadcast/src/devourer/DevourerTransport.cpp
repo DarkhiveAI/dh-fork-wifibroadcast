@@ -107,6 +107,7 @@ std::optional<SelectedChannel> selected_channel(Channel channel) {
     number = (channel.frequency_mhz - 5000) / 5;
   }
   ChannelWidth_t width;
+  uint8_t channel_offset = 0;
   switch (channel.width_mhz) {
     case 5:
       width = CHANNEL_WIDTH_5;
@@ -119,6 +120,19 @@ std::optional<SelectedChannel> selected_channel(Channel channel) {
       break;
     case 40:
       width = CHANNEL_WIDTH_40;
+      // Devourer needs the primary-20 position to tune the RF center for
+      // HT40. OpenHD's supported channel list alternates HT40+ and HT40-
+      // within each standard four-channel block. ChannelOffset follows the
+      // HAL convention: 1 = HT40+ (secondary above), 2 = HT40- (below).
+      if (number <= 14) {
+        channel_offset = ((number - 1) / 4) % 2 == 0 ? 1 : 2;
+      } else if (number <= 36 || number >= 181) {
+        channel_offset = 1;
+      } else if (number >= 149) {
+        channel_offset = ((number - 1) / 4) % 2 == 1 ? 1 : 2;
+      } else {
+        channel_offset = (number / 4) % 2 == 1 ? 1 : 2;
+      }
       break;
     case 80:
       width = CHANNEL_WIDTH_80;
@@ -127,7 +141,7 @@ std::optional<SelectedChannel> selected_channel(Channel channel) {
       return std::nullopt;
   }
   if (number < 0 || number > 255) return std::nullopt;
-  return SelectedChannel{static_cast<uint8_t>(number), 0, width};
+  return SelectedChannel{static_cast<uint8_t>(number), channel_offset, width};
 }
 
 }  // namespace
