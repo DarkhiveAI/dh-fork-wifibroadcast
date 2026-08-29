@@ -1179,6 +1179,20 @@ void WBTxRx::set_devourer_tx_power_index_override(const int card_index,
 #endif
 }
 
+std::optional<WBTxRx::DevourerThermalStatus>
+WBTxRx::get_devourer_thermal_status(const int card_index) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (!m_devourer) return std::nullopt;
+  const auto status = m_devourer->transport->get_thermal_status(card_index);
+  if (!status) return std::nullopt;
+  return DevourerThermalStatus{status->raw, status->baseline, status->delta,
+                               status->valid};
+#else
+  (void)card_index;
+  return std::nullopt;
+#endif
+}
+
 void WBTxRx::announce_session_key_if_needed() {
   const auto cur_ts = std::chrono::steady_clock::now();
   if (cur_ts >= m_session_key_next_announce_ts) {

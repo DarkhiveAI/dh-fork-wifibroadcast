@@ -276,6 +276,17 @@ void Transport::set_tx_power_index_override(const int card_index,
   card->device->SetTxPowerIndexOverride(index);
 }
 
+std::optional<devourer::ThermalStatus> Transport::get_thermal_status(
+    const int card_index) {
+  if (card_index < 0 || card_index >= static_cast<int>(m_cards.size())) {
+    return std::nullopt;
+  }
+  auto& card = m_cards[card_index];
+  std::lock_guard<std::mutex> guard(card->control_mutex);
+  if (!card->device) return std::nullopt;
+  return card->device->GetThermalStatus();
+}
+
 void Transport::start_rx(RxCallback callback, FatalCallback fatal_callback) {
   for (int i = 0; i < static_cast<int>(m_cards.size()); ++i) {
     auto* card = m_cards[i].get();

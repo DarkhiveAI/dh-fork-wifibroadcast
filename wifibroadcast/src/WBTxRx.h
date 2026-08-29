@@ -290,6 +290,14 @@ class WBTxRx {
   // false/no-op when the Linux backend is active.
   bool set_devourer_channel(int frequency_mhz, int channel_width_mhz);
   void set_devourer_tx_power_index_override(int card_index, int index);
+  struct DevourerThermalStatus {
+    uint8_t raw = 0;
+    uint8_t baseline = 0xff;
+    int delta = 0;
+    bool valid = false;
+  };
+  std::optional<DevourerThermalStatus> get_devourer_thermal_status(
+      int card_index);
   [[nodiscard]] bool uses_devourer() const { return m_options.use_devourer; }
   // For development only
   std::shared_ptr<DummyLink> get_dummy_link();

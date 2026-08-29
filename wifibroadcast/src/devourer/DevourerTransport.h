@@ -5,8 +5,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "ThermalStatus.h"
 
 struct Packet;
 
@@ -32,6 +35,7 @@ class Transport {
   bool send(int card_index, const uint8_t* data, int length);
   bool set_channel(Channel channel);
   void set_tx_power_index_override(int card_index, int index);
+  std::optional<devourer::ThermalStatus> get_thermal_status(int card_index);
   void start_rx(RxCallback callback, FatalCallback fatal_callback);
   void stop_rx();
 
