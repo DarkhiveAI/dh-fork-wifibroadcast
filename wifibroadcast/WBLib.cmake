@@ -56,6 +56,12 @@ if(TARGET devourer)
         ${CMAKE_CURRENT_LIST_DIR}/src/devourer/DevourerTransport.cpp)
     target_compile_definitions(wifibroadcast PUBLIC
         WIFIBROADCAST_WITH_DEVOURER=1)
+    # Devourer and wifibroadcast both embed a radiotap iterator. Keep the
+    # wifibroadcast copy private so both static libraries can be linked into
+    # the same OpenHD executable without exporting duplicate C symbols.
+    target_compile_definitions(wifibroadcast PRIVATE
+        ieee80211_radiotap_iterator_init=wifibroadcast_radiotap_iterator_init
+        ieee80211_radiotap_iterator_next=wifibroadcast_radiotap_iterator_next)
     target_link_libraries(wifibroadcast PUBLIC devourer)
 endif()
 
