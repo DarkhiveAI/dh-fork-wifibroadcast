@@ -367,21 +367,16 @@ void Transport::start_rx(RxCallback callback, FatalCallback fatal_callback) {
             [this, i, callback](const Packet& packet) {
               // Devourer's sync/control frame is consumed by the backend.  It
               // is never OpenHD telemetry and must not enter wifibroadcast's
-              // data decoder.  FCS is the integrity check for the v1 marker.
-              if (packet.Data.size() >= 16 && !packet.RxAtrib.crc_err &&
+              if (packet.Data.size() >= 24 && !packet.RxAtrib.crc_err &&
                   !packet.RxAtrib.icv_err) {
-                static constexpr uint8_t kAuthoritySa[6] = {
-                    0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
-                if (std::memcmp(packet.Data.data() + 10, kAuthoritySa, 6) == 0) {
-                  std::shared_ptr<devourer::FhssSession> session;
-                  {
-                    std::lock_guard<std::mutex> lock(m_fhss_mutex);
-                    session = m_fhss;
-                  }
-                  if (session && session->on_sync_marker(
-                                     packet.Data.data(), packet.Data.size()))
-                    return;
+                std::shared_ptr<devourer::FhssSession> session;
+                {
+                  std::lock_guard<std::mutex> lock(m_fhss_mutex);
+                  session = m_fhss;
                 }
+                if (session && session->on_sync_marker(
+                                   packet.Data.data(), packet.Data.size()))
+                  return;
               }
               callback(i, packet);
             });
