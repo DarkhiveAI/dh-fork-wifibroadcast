@@ -9,12 +9,14 @@
 #include <sys/poll.h>
 
 #include <atomic>
+#include <array>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "../dummy_link/DummyLink.h"
 #include "../encryption/Decryptor.h"
@@ -289,7 +291,34 @@ class WBTxRx {
   // Runtime radio controls for the userspace Devourer backend. They return
   // false/no-op when the Linux backend is active.
   bool set_devourer_channel(int frequency_mhz, int channel_width_mhz);
+  bool set_devourer_card_channel(int card_index, int frequency_mhz,
+                                 int channel_width_mhz);
   void set_devourer_tx_power_index_override(int card_index, int index);
+  int set_devourer_tx_power_offset_qdb(int card_index, int offset_qdb);
+  enum class DevourerFhssRole { Authority, Follower };
+  enum class DevourerFhssState {
+    Disabled,
+    Authority,
+    Acquiring,
+    Tracking,
+    Lost
+  };
+  struct DevourerFhssStatus {
+    DevourerFhssState state = DevourerFhssState::Disabled;
+    uint64_t slot = 0;
+    int channel = 0;
+    uint64_t last_marker_age_ms = 0;
+    int64_t phase_error_us = 0;
+    uint64_t retunes = 0;
+    uint64_t markers = 0;
+    uint64_t reacquisitions = 0;
+  };
+  bool start_devourer_fhss(DevourerFhssRole role,
+                           const std::vector<int>& frequencies_mhz,
+                           int channel_width_mhz, uint32_t slot_ms,
+                           const std::array<uint8_t, 16>& key);
+  void stop_devourer_fhss();
+  std::optional<DevourerFhssStatus> get_devourer_fhss_status() const;
   struct DevourerThermalStatus {
     uint8_t raw = 0;
     uint8_t baseline = 0xff;
@@ -297,6 +326,38 @@ class WBTxRx {
     bool valid = false;
   };
   std::optional<DevourerThermalStatus> get_devourer_thermal_status(
+      int card_index);
+  struct DevourerQualitySnapshot {
+      bool quality_valid = false;
+      uint32_t frames = 0;
+      int rssi_mean_dbm = -128;
+      int rssi_max_dbm = -128;
+      double snr_mean_db = 0;
+      double snr_min_db = 0;
+      bool evm_valid = false;
+      double evm_mean_db = 0;
+      bool noise_floor_valid = false;
+      double noise_floor_dbm = 0;
+      bool absolute_noise_floor_valid = false;
+      int absolute_noise_floor_dbm = -128;
+      bool energy_valid = false;
+      uint32_t false_alarms = 0;
+      uint32_t cca = 0;
+      bool igi_valid = false;
+      int igi = 0;
+      uint8_t verdict = 0;
+      bool paths_valid = false;
+      uint8_t n_chains = 0;
+      uint8_t n_active = 0;
+      uint8_t active_mask = 0;
+      int path_rssi_dbm[4] = {-128, -128, -128, -128};
+      bool path_rssi_valid[4] = {false, false, false, false};
+      double path_snr_db[4] = {0, 0, 0, 0};
+      bool path_snr_valid[4] = {false, false, false, false};
+      double path_evm_db[4] = {0, 0, 0, 0};
+      bool path_evm_valid[4] = {false, false, false, false};
+  };
+  std::optional<DevourerQualitySnapshot> get_devourer_quality_snapshot(
       int card_index);
   [[nodiscard]] bool uses_devourer() const { return m_options.use_devourer; }
   // For development only

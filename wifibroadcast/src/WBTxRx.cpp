@@ -1166,6 +1166,21 @@ bool WBTxRx::set_devourer_channel(const int frequency_mhz,
 #endif
 }
 
+bool WBTxRx::set_devourer_card_channel(const int card_index,
+                                       const int frequency_mhz,
+                                       const int channel_width_mhz) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  return m_devourer && m_devourer->transport->set_card_channel(
+                            card_index, {frequency_mhz, channel_width_mhz});
+#else
+  (void)card_index;
+  (void)frequency_mhz;
+  (void)channel_width_mhz;
+  return false;
+#endif
+}
+
 void WBTxRx::set_devourer_tx_power_index_override(const int card_index,
                                                   const int index) {
 #ifdef WIFIBROADCAST_WITH_DEVOURER
@@ -1179,6 +1194,75 @@ void WBTxRx::set_devourer_tx_power_index_override(const int card_index,
 #endif
 }
 
+int WBTxRx::set_devourer_tx_power_offset_qdb(const int card_index,
+                                             const int offset_qdb) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  if (m_devourer) {
+    return m_devourer->transport->set_tx_power_offset_qdb(card_index,
+                                                          offset_qdb);
+  }
+#else
+  (void)card_index;
+  (void)offset_qdb;
+#endif
+  return 0;
+}
+
+bool WBTxRx::start_devourer_fhss(
+    const DevourerFhssRole role, const std::vector<int>& frequencies_mhz,
+    const int channel_width_mhz, const uint32_t slot_ms,
+    const std::array<uint8_t, 16>& key) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  if (!m_devourer) return false;
+  wifibroadcast::devourer_transport::FhssConfig config;
+  config.role = role == DevourerFhssRole::Authority
+                    ? devourer::FhssSession::Role::Authority
+                    : devourer::FhssSession::Role::Follower;
+  config.frequencies_mhz = frequencies_mhz;
+  config.width_mhz = channel_width_mhz;
+  config.slot_ms = slot_ms;
+  config.key = key;
+  return m_devourer->transport->start_fhss(config);
+#else
+  (void)role;
+  (void)frequencies_mhz;
+  (void)channel_width_mhz;
+  (void)slot_ms;
+  (void)key;
+  return false;
+#endif
+}
+
+void WBTxRx::stop_devourer_fhss() {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  std::lock_guard<std::mutex> guard(m_tx_mutex);
+  if (m_devourer) m_devourer->transport->stop_fhss();
+#endif
+}
+
+std::optional<WBTxRx::DevourerFhssStatus>
+WBTxRx::get_devourer_fhss_status() const {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (!m_devourer) return std::nullopt;
+  const auto status = m_devourer->transport->get_fhss_status();
+  if (!status) return std::nullopt;
+  DevourerFhssStatus out;
+  out.state = static_cast<DevourerFhssState>(status->state);
+  out.slot = status->slot;
+  out.channel = status->channel;
+  out.last_marker_age_ms = status->last_marker_age_ms;
+  out.phase_error_us = status->phase_error_us;
+  out.retunes = status->retunes;
+  out.markers = status->markers;
+  out.reacquisitions = status->reacquisitions;
+  return out;
+#else
+  return std::nullopt;
+#endif
+}
+
 std::optional<WBTxRx::DevourerThermalStatus>
 WBTxRx::get_devourer_thermal_status(const int card_index) {
 #ifdef WIFIBROADCAST_WITH_DEVOURER
@@ -1187,6 +1271,52 @@ WBTxRx::get_devourer_thermal_status(const int card_index) {
   if (!status) return std::nullopt;
   return DevourerThermalStatus{status->raw, status->baseline, status->delta,
                                status->valid};
+#else
+  (void)card_index;
+  return std::nullopt;
+#endif
+}
+
+std::optional<WBTxRx::DevourerQualitySnapshot>
+WBTxRx::get_devourer_quality_snapshot(const int card_index) {
+#ifdef WIFIBROADCAST_WITH_DEVOURER
+  if (!m_devourer) return std::nullopt;
+  const auto snapshot = m_devourer->transport->get_quality_snapshot(card_index);
+  if (!snapshot) return std::nullopt;
+  DevourerQualitySnapshot result;
+  const auto& q = snapshot->quality;
+  const auto& p = snapshot->paths;
+  result.quality_valid = q.valid;
+  result.frames = q.frames;
+  result.rssi_mean_dbm = q.rssi_mean_dbm;
+  result.rssi_max_dbm = q.rssi_max_dbm;
+  result.snr_mean_db = q.snr_mean_db;
+  result.snr_min_db = q.snr_min_db;
+  result.evm_valid = q.evm_valid;
+  result.evm_mean_db = q.evm_mean_db;
+  result.noise_floor_valid = q.nf_valid;
+  result.noise_floor_dbm = q.noise_floor_dbm;
+  result.absolute_noise_floor_valid = q.abs_nf_valid;
+  result.absolute_noise_floor_dbm = q.abs_noise_floor_dbm;
+  result.energy_valid = q.energy_valid;
+  result.false_alarms = q.fa_ofdm;
+  result.cca = q.cca_ofdm;
+  result.igi_valid = q.igi_valid;
+  result.igi = q.igi;
+  result.verdict = static_cast<uint8_t>(q.verdict);
+  result.paths_valid = p.valid;
+  result.n_chains = p.n_chains;
+  result.n_active = p.n_active;
+  result.active_mask = p.active_mask;
+  for (int i = 0; i < 4; ++i) {
+    result.path_rssi_dbm[i] = p.rssi_mean_dbm[i];
+    result.path_rssi_valid[i] = p.chain_sampled[i];
+    result.path_snr_db[i] = p.snr_mean_db[i];
+    result.path_snr_valid[i] = p.snr_sampled[i];
+    result.path_evm_db[i] = p.evm_mean_db[i];
+    result.path_evm_valid[i] = p.evm_sampled[i];
+  }
+  return result;
 #else
   (void)card_index;
   return std::nullopt;

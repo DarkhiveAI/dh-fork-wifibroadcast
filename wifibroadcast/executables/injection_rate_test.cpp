@@ -738,11 +738,13 @@ static void calculate_max_possible_pps_quick(
 
 static std::string validate_specific_rate(
     std::shared_ptr<WBTxRx> txrx, std::shared_ptr<RadiotapHeaderTxHolder> hdr,
-    const int mcs, const int rate_kbits, int duration_seconds = 10) {
+    const int mcs, const int rate_kbits, int duration_seconds = 10,
+    int payload_size = TEST_PACKETS_SIZE) {
   auto m_console = wifibroadcast::log::create_or_get("main");
+  payload_size = clamp_payload_size(payload_size);
   const auto rate_bps =
       (rate_kbits * 1000) + 10;  // add a bit more to actually hit the target
-  const auto pps = rate_bps / (TEST_PACKETS_SIZE * 8);
+  const auto pps = rate_bps / (payload_size * 8);
   m_console->info("Validating {} - {}", mcs, pps);
   hdr->update_mcs_index(mcs);
   auto tx_cb = [&txrx, &hdr](const uint8_t* data, int data_len) {
@@ -751,7 +753,7 @@ static std::string validate_specific_rate(
     txrx->tx_inject_packet(10, data, data_len, radiotap_header, encrypt);
   };
   auto stream_generator =
-      std::make_unique<DummyStreamGenerator>(tx_cb, TEST_PACKETS_SIZE);
+      std::make_unique<DummyStreamGenerator>(tx_cb, payload_size);
   stream_generator->set_target_pps(pps);
   std::this_thread::sleep_for(
       std::chrono::seconds(1));  // give driver time to empty queue
@@ -760,8 +762,25 @@ static std::string validate_specific_rate(
   if (duration_seconds < 1) {
     duration_seconds = 1;
   }
-  std::this_thread::sleep_for(std::chrono::seconds(duration_seconds));
+  for (int elapsed = 1; elapsed <= duration_seconds; ++elapsed) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (elapsed == 1 || elapsed % 10 == 0 || elapsed == duration_seconds) {
+      const auto sample = txrx->get_tx_stats();
+      std::cout << "TX_SAMPLE elapsed_s=" << elapsed
+                << " pps=" << sample.curr_packets_per_second
+                << " payload_bps="
+                << sample.curr_bits_per_second_excluding_overhead
+                << " error_hints=" << sample.count_tx_injections_error_hint
+                << " dropped=" << sample.count_tx_dropped_packets
+                << " cannot_keep_up="
+                << stream_generator->n_times_cannot_keep_up_wanted_pps
+                << "\n";
+    }
+  }
   const auto txstats = txrx->get_tx_stats();
+  const double average_payload_bps =
+      static_cast<double>(txstats.n_injected_bytes_excluding_overhead) * 8.0 /
+      static_cast<double>(duration_seconds);
   std::stringstream ss;
   if (txstats.count_tx_injections_error_hint > 0 ||
       stream_generator->n_times_cannot_keep_up_wanted_pps > 10) {
@@ -779,6 +798,23 @@ static std::string validate_specific_rate(
                           txstats.curr_bits_per_second_excluding_overhead));
     // ss<<fmt::format("{}",WBTxRx::tx_stats_to_string(txstats));
   }
+  std::cout << "RESULT_JSON {\"mcs\":" << mcs
+            << ",\"duration_s\":" << duration_seconds
+            << ",\"payload_bytes\":" << payload_size
+            << ",\"target_pps\":" << pps
+            << ",\"target_payload_bps\":" << rate_bps
+            << ",\"injected_packets\":" << txstats.n_injected_packets
+            << ",\"injected_payload_bytes\":"
+            << txstats.n_injected_bytes_excluding_overhead
+            << ",\"average_payload_bps\":"
+            << static_cast<int64_t>(average_payload_bps)
+            << ",\"final_payload_bps\":"
+            << txstats.curr_bits_per_second_excluding_overhead
+            << ",\"error_hints\":"
+            << txstats.count_tx_injections_error_hint
+            << ",\"dropped\":" << txstats.count_tx_dropped_packets
+            << ",\"cannot_keep_up\":"
+            << stream_generator->n_times_cannot_keep_up_wanted_pps << "}\n";
   m_console->info(ss.str());
   return ss.str();
 }
@@ -791,7 +827,8 @@ static void validate_rtl8812au_rates(
     const auto rate = wifibroadcast::get_practical_rate_5G(mcs);
     const auto rate_kbits =
         (is_40mhz ? rate.rate_40mhz_kbits : rate.rate_20mhz_kbits);
-    const auto res = validate_specific_rate(txrx, hdr, mcs, rate_kbits);
+    const auto res = validate_specific_rate(txrx, hdr, mcs, rate_kbits, 10,
+                                            TEST_PACKETS_SIZE);
     log << res << "\n";
   }
   wifibroadcast::log::get_default()->debug("\n{}", log.str());
@@ -913,9 +950,11 @@ int main(int argc, char* const* argv) {
   double rate_mbit = -1.0;
   int duration_seconds = 10;
   int payload_size = TEST_PACKETS_SIZE;
+  bool stbc_enabled = true;
+  bool ldpc_enabled = true;
   bool ui_mode = (argc == 1);
   int opt;
-  while ((opt = getopt(argc, argv, "w:lf:H:m:r:t:p:U")) != -1) {
+  while ((opt = getopt(argc, argv, "w:lf:H:m:r:t:p:S:L:U")) != -1) {
     switch (opt) {
       case 'w':
         card_arg = optarg;
@@ -944,12 +983,19 @@ int main(int argc, char* const* argv) {
       case 'p':
         payload_size = atoi(optarg);
         break;
+      case 'S':
+        stbc_enabled = atoi(optarg) != 0;
+        break;
+      case 'L':
+        ldpc_enabled = atoi(optarg) != 0;
+        break;
       default: /* '?' */
       show_usage:
         fprintf(stderr,
                 "injection rate test %s [-w iface|index] [-l] [-f freq_mhz]\n"
                 "  [-H HT20|HT40+|HT40-] [-m mcs] [-r rate_mbit] [-t seconds]\n"
-                "  [-p payload_bytes] [-U]\n",
+                "  [-p payload_bytes] [-S stbc_0_or_1] "
+                "[-L ldpc_0_or_1] [-U]\n",
                 argv[0]);
         exit(1);
     }
@@ -1000,6 +1046,13 @@ int main(int argc, char* const* argv) {
     fprintf(stderr, "Invalid HT mode: %s\n", ht_mode_arg.c_str());
     return 1;
   }
+  {
+    std::string err;
+    if (!wifibroadcast::wifi_card_helper::ensure_monitor_mode(card, &err)) {
+      fprintf(stderr, "Failed to enter monitor mode: %s\n", err.c_str());
+      return 1;
+    }
+  }
   if (freq_mhz > 0) {
     std::string err;
     if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
@@ -1029,11 +1082,16 @@ int main(int argc, char* const* argv) {
   // No idea if and what effect stbc and ldpc have on the rate, but openhd
   // enables them if possible by default since they greatly increase range /
   // resiliency
-  radiotap_header->update_stbc(true);
-  radiotap_header->update_ldpc(true);
+  radiotap_header->update_stbc(stbc_enabled);
+  radiotap_header->update_ldpc(ldpc_enabled);
   // short GI interval gives slightly higher rates, but also decreases
   // resiliency
   radiotap_header->update_guard_interval(false);
+
+  std::cout << "TX_CONFIG bandwidth_mhz=" << bw_from_ht
+            << " stbc=" << (stbc_enabled ? 1 : 0)
+            << " ldpc=" << (ldpc_enabled ? 1 : 0)
+            << " payload_bytes=" << payload_size << "\n";
 
   txrx->start_receiving();
 
@@ -1065,7 +1123,8 @@ int main(int argc, char* const* argv) {
     const int rate_kbits =
         static_cast<int>(rate_mbit * 1000.0 + 0.5);
     const auto res = validate_specific_rate(txrx, radiotap_header, mcs_override,
-                                            rate_kbits, duration_seconds);
+                                            rate_kbits, duration_seconds,
+                                            payload_size);
     std::cout << res << "\n";
     return 0;
   }

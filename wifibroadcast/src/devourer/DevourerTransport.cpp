@@ -5,8 +5,10 @@
 #include <libusb-1.0/libusb.h>
 
 #include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -15,6 +17,7 @@
 
 #include "DeviceConfig.h"
 #include "IRtlDevice.h"
+#include "RadiotapBuilder.h"
 #include "RxPacket.h"
 #include "SelectedChannel.h"
 #include "UsbDeviceLock.h"
@@ -254,6 +257,7 @@ bool Transport::open() {
 }
 
 void Transport::close() {
+  stop_fhss();
   stop_rx();
   m_cards.clear();
 }
@@ -263,11 +267,17 @@ bool Transport::send(int card_index, const uint8_t* data, int length) {
       !data || length <= 0) {
     return false;
   }
-  return m_cards[card_index]->device->send_packet(
+  auto& card = m_cards[card_index];
+  std::lock_guard<std::mutex> guard(card->control_mutex);
+  return card->device->send_packet(
       data, static_cast<size_t>(length));
 }
 
 bool Transport::set_channel(Channel channel) {
+  {
+    std::lock_guard<std::mutex> lock(m_fhss_mutex);
+    if (m_fhss && m_fhss->running()) return false;
+  }
   const auto selected = selected_channel(channel);
   if (!selected) return false;
   try {
@@ -282,12 +292,46 @@ bool Transport::set_channel(Channel channel) {
   return true;
 }
 
+bool Transport::set_card_channel(const int card_index, Channel channel) {
+  {
+    std::lock_guard<std::mutex> lock(m_fhss_mutex);
+    if (m_fhss && m_fhss->running()) return false;
+  }
+  if (card_index < 0 || card_index >= static_cast<int>(m_cards.size())) {
+    return false;
+  }
+  const auto selected = selected_channel(channel);
+  if (!selected) return false;
+  try {
+    auto& card = m_cards[card_index];
+    std::lock_guard<std::mutex> guard(card->control_mutex);
+    if (!card->device) return false;
+    card->device->SetMonitorChannel(*selected);
+  } catch (const std::exception&) {
+    return false;
+  }
+  return true;
+}
+
 void Transport::set_tx_power_index_override(const int card_index,
                                             const int index) {
   if (card_index < 0 || card_index >= static_cast<int>(m_cards.size())) return;
   auto& card = m_cards[card_index];
   std::lock_guard<std::mutex> guard(card->control_mutex);
   card->device->SetTxPowerIndexOverride(index);
+}
+
+int Transport::set_tx_power_offset_qdb(const int card_index,
+                                       const int offset_qdb) {
+  if (card_index < 0 || card_index >= static_cast<int>(m_cards.size())) {
+    return 0;
+  }
+  auto& card = m_cards[card_index];
+  std::lock_guard<std::mutex> guard(card->control_mutex);
+  // A flat override discards the EFUSE per-rate/per-path shape. Always restore
+  // that calibrated baseline before applying the relative control.
+  card->device->SetTxPowerIndexOverride(-1);
+  return card->device->SetTxPowerOffsetQdb(offset_qdb);
 }
 
 std::optional<devourer::ThermalStatus> Transport::get_thermal_status(
@@ -301,14 +345,46 @@ std::optional<devourer::ThermalStatus> Transport::get_thermal_status(
   return card->device->GetThermalStatus();
 }
 
+std::optional<Transport::QualitySnapshot> Transport::get_quality_snapshot(
+    const int card_index) {
+  if (card_index < 0 || card_index >= static_cast<int>(m_cards.size())) {
+    return std::nullopt;
+  }
+  auto& card = m_cards[card_index];
+  std::lock_guard<std::mutex> guard(card->control_mutex);
+  if (!card->device) return std::nullopt;
+  return QualitySnapshot{card->device->GetRxQuality(),
+                         card->device->GetActiveRxPaths()};
+}
+
 void Transport::start_rx(RxCallback callback, FatalCallback fatal_callback) {
   for (int i = 0; i < static_cast<int>(m_cards.size()); ++i) {
     auto* card = m_cards[i].get();
     if (card->rx_thread.joinable()) continue;
-    card->rx_thread = std::thread([card, i, callback, fatal_callback]() {
+    card->rx_thread = std::thread([this, card, i, callback, fatal_callback]() {
       try {
         card->device->StartRxLoop(
-            [i, callback](const Packet& packet) { callback(i, packet); });
+            [this, i, callback](const Packet& packet) {
+              // Devourer's sync/control frame is consumed by the backend.  It
+              // is never OpenHD telemetry and must not enter wifibroadcast's
+              // data decoder.  FCS is the integrity check for the v1 marker.
+              if (packet.Data.size() >= 16 && !packet.RxAtrib.crc_err &&
+                  !packet.RxAtrib.icv_err) {
+                static constexpr uint8_t kAuthoritySa[6] = {
+                    0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+                if (std::memcmp(packet.Data.data() + 10, kAuthoritySa, 6) == 0) {
+                  std::shared_ptr<devourer::FhssSession> session;
+                  {
+                    std::lock_guard<std::mutex> lock(m_fhss_mutex);
+                    session = m_fhss;
+                  }
+                  if (session && session->on_sync_marker(
+                                     packet.Data.data(), packet.Data.size()))
+                    return;
+                }
+              }
+              callback(i, packet);
+            });
       } catch (const std::exception& ex) {
         card->logger->error("RX loop failed for {}: {}", card->interface_name,
                             ex.what());
@@ -316,6 +392,88 @@ void Transport::start_rx(RxCallback callback, FatalCallback fatal_callback) {
       }
     });
   }
+}
+
+bool Transport::start_fhss(const FhssConfig& config) {
+  if (config.frequencies_mhz.empty() || m_cards.empty()) return false;
+  std::vector<uint8_t> channels;
+  channels.reserve(config.frequencies_mhz.size());
+  std::optional<uint8_t> required_offset;
+  for (const int frequency : config.frequencies_mhz) {
+    const auto selected = selected_channel({frequency, config.width_mhz});
+    if (!selected) return false;
+    // FastRetune keeps the configured bandwidth/primary position.  At HT40
+    // every member of one hopset must therefore use the same +/- orientation.
+    if (!required_offset) required_offset = selected->ChannelOffset;
+    if (selected->ChannelOffset != *required_offset) return false;
+    channels.push_back(selected->Channel);
+  }
+
+  devourer::FhssSession::Config session_config;
+  session_config.role = config.role;
+  session_config.channels = std::move(channels);
+  session_config.slot_ms = config.slot_ms;
+  session_config.key = config.key;
+
+  auto retune = [this](const uint8_t channel, const bool cache_rf) {
+    try {
+      for (auto& card : m_cards) {
+        std::lock_guard<std::mutex> guard(card->control_mutex);
+        if (!card->device) return false;
+        card->device->FastRetune(channel, cache_rf);
+      }
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
+  };
+  auto marker_tx = [this](const uint8_t* marker, const size_t marker_size) {
+    if (m_cards.empty() || !marker || !marker_size) return false;
+    auto frame = devourer::build_stream_radiotap(
+        devourer::parse_tx_mode_str("6M"));
+    static constexpr uint8_t kProbeHeader[24] = {
+        0x40, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,
+        0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,
+        0x80, 0x00};
+    frame.insert(frame.end(), std::begin(kProbeHeader), std::end(kProbeHeader));
+    frame.insert(frame.end(), marker, marker + marker_size);
+    auto& card = m_cards.front();
+    std::lock_guard<std::mutex> guard(card->control_mutex);
+    return card->device && card->device->send_packet(frame.data(), frame.size());
+  };
+
+  try {
+    auto next = std::make_shared<devourer::FhssSession>(
+        std::move(session_config), std::move(retune), std::move(marker_tx));
+    next->start();
+    std::shared_ptr<devourer::FhssSession> old;
+    {
+      std::lock_guard<std::mutex> lock(m_fhss_mutex);
+      old = std::move(m_fhss);
+      m_fhss = std::move(next);
+    }
+    if (old) old->stop();
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+void Transport::stop_fhss() {
+  std::shared_ptr<devourer::FhssSession> session;
+  {
+    std::lock_guard<std::mutex> lock(m_fhss_mutex);
+    session = std::move(m_fhss);
+  }
+  if (session) session->stop();
+}
+
+std::optional<devourer::FhssSession::Status> Transport::get_fhss_status() const {
+  std::lock_guard<std::mutex> lock(m_fhss_mutex);
+  if (!m_fhss) return std::nullopt;
+  return m_fhss->status();
 }
 
 void Transport::stop_rx() {

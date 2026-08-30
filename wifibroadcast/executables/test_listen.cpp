@@ -4,6 +4,7 @@
 //
 #include <algorithm>
 #include <cstdlib>
+#include <unistd.h>
 
 #include "../src/HelperSources/WifiCardHelper.hpp"
 #include "../src/WBTxRx.h"
@@ -17,8 +18,9 @@ int main(int argc, char *const *argv) {
   std::string ht_mode_arg;
   const bool interactive = (argc == 1);
   bool pcap_setdirection = true;
+  int duration_seconds = 0;
   int opt;
-  while ((opt = getopt(argc, argv, "w:lf:H:d")) != -1) {
+  while ((opt = getopt(argc, argv, "w:lf:H:dt:")) != -1) {
     switch (opt) {
       case 'w':
         card_arg = optarg;
@@ -35,11 +37,14 @@ int main(int argc, char *const *argv) {
       case 'd':
         pcap_setdirection = false;
         break;
+      case 't':
+        duration_seconds = atoi(optarg);
+        break;
       default: /* '?' */
       show_usage:
         fprintf(stderr,
                 "test_listen %s [-w iface|index] [-l] [-f freq_mhz]\n"
-                "  [-H HT20|HT40+|HT40-] [-d]\n",
+                "  [-H HT20|HT40+|HT40-] [-d] [-t seconds]\n",
                 argv[0]);
         exit(1);
     }
@@ -92,6 +97,13 @@ int main(int argc, char *const *argv) {
     fprintf(stderr, "Invalid HT mode: %s\n", ht_mode_arg.c_str());
     return 1;
   }
+  {
+    std::string err;
+    if (!wifibroadcast::wifi_card_helper::ensure_monitor_mode(card, &err)) {
+      fprintf(stderr, "Failed to enter monitor mode: %s\n", err.c_str());
+      return 1;
+    }
+  }
   if (freq_mhz > 0) {
     std::string err;
     if (!wifibroadcast::wifi_card_helper::apply_iw_freq_and_ht(
@@ -116,7 +128,10 @@ int main(int argc, char *const *argv) {
   txrx->start_receiving();
 
   auto lastLog = std::chrono::steady_clock::now();
-  while (true) {
+  const auto started = std::chrono::steady_clock::now();
+  while (duration_seconds <= 0 ||
+         std::chrono::steady_clock::now() - started <
+             std::chrono::seconds(duration_seconds)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     // auto txStats=txrx->get_tx_stats();
     auto rxStats = txrx->get_rx_stats();
@@ -127,4 +142,10 @@ int main(int argc, char *const *argv) {
     std::cout << rx_stats_card0 << std::endl;
     std::cout << rx_rf_stats_card0 << std::endl;
   }
+  std::cout << "FINAL_RX_STATS " << txrx->get_rx_stats() << "\n";
+  std::cout << "FINAL_RX_CARD_STATS " << txrx->get_rx_stats_for_card(0)
+            << "\n";
+  std::cout << "FINAL_RX_RF_STATS " << txrx->get_rx_rf_stats_for_card(0)
+            << "\n";
+  return 0;
 }
